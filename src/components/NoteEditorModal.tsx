@@ -12,6 +12,7 @@ import {
   Platform,
   KeyboardAvoidingView,
 } from 'react-native';
+import { SvgXml } from 'react-native-svg';
 import {
   X,
   Check,
@@ -54,6 +55,7 @@ import {
   AudioNote,
   PlannerSticker,
   EditorMode,
+  FreeHandStroke,
 } from '../types/note';
 import { NOTE_COLORS, COLOR_KEYS } from '../constants/colors';
 import { InteractiveImageEditor } from './InteractiveImageEditor';
@@ -148,6 +150,8 @@ export const NoteEditorModal: React.FC = () => {
 
   // 자유 모드 필기 캔버스 & 프로 툴바 상태
   const [freeDrawingData, setFreeDrawingData] = useState<string | undefined>(undefined);
+  const [strokes, setStrokes] = useState<FreeHandStroke[]>([]);
+  const [autoSortChecked, setAutoSortChecked] = useState(false);
   const [proTool, setProTool] = useState<ActiveToolType>('pen');
   const [proColor, setProColor] = useState<string>('#0f172a');
   const [proWidth, setProWidth] = useState<number>(4);
@@ -234,9 +238,11 @@ export const NoteEditorModal: React.FC = () => {
       setStickers(selectedNoteForEdit.stickers || []);
       setAudioNotes(selectedNoteForEdit.audioNotes || []);
       setFreeDrawingData(selectedNoteForEdit.freeDrawingData);
+      setStrokes(selectedNoteForEdit.strokes || []);
+      setAutoSortChecked(selectedNoteForEdit.autoSortChecked || false);
       if (selectedNoteForEdit.editorMode) {
         setEditorMode(selectedNoteForEdit.editorMode);
-      } else if (selectedNoteForEdit.freeDrawingData) {
+      } else if (selectedNoteForEdit.freeDrawingData || (selectedNoteForEdit.strokes && selectedNoteForEdit.strokes.length > 0)) {
         setEditorMode('free');
       } else {
         setEditorMode('text');
@@ -258,6 +264,8 @@ export const NoteEditorModal: React.FC = () => {
       setStickers([]);
       setAudioNotes([]);
       setFreeDrawingData(undefined);
+      setStrokes([]);
+      setAutoSortChecked(false);
       setEditorMode('text');
     }
     setTagInput('');
@@ -356,11 +364,33 @@ export const NoteEditorModal: React.FC = () => {
   };
 
   const handleToggleChecklist = (id: string) => {
-    setChecklist((prev) =>
-      prev.map((item) =>
+    setChecklist((prev) => {
+      let updated = prev.map((item) =>
         item.id === id ? { ...item, completed: !item.completed } : item
-      )
-    );
+      );
+      if (autoSortChecked) {
+        updated.sort((a, b) => (a.completed === b.completed ? 0 : a.completed ? 1 : -1));
+      }
+      return updated;
+    });
+  };
+
+  const handleCheckAll = () => {
+    setChecklist((prev) => prev.map((item) => ({ ...item, completed: true })));
+  };
+
+  const handleUncheckAll = () => {
+    setChecklist((prev) => prev.map((item) => ({ ...item, completed: false })));
+  };
+
+  const handleToggleAutoSort = () => {
+    const next = !autoSortChecked;
+    setAutoSortChecked(next);
+    if (next) {
+      setChecklist((prev) =>
+        [...prev].sort((a, b) => (a.completed === b.completed ? 0 : a.completed ? 1 : -1))
+      );
+    }
   };
 
   const handleRemoveChecklist = (id: string) => {
@@ -389,7 +419,9 @@ export const NoteEditorModal: React.FC = () => {
       images.length === 0 &&
       checklist.length === 0 &&
       audioNotes.length === 0 &&
-      stickers.length === 0
+      stickers.length === 0 &&
+      !freeDrawingData &&
+      strokes.length === 0
     ) {
       closeEditor();
       return;
@@ -413,6 +445,8 @@ export const NoteEditorModal: React.FC = () => {
         stickers,
         audioNotes,
         freeDrawingData,
+        strokes,
+        autoSortChecked,
         editorMode,
       });
     } else {
@@ -434,6 +468,8 @@ export const NoteEditorModal: React.FC = () => {
         stickers,
         audioNotes,
         freeDrawingData,
+        strokes,
+        autoSortChecked,
         editorMode,
       });
     }
@@ -629,6 +665,8 @@ export const NoteEditorModal: React.FC = () => {
           <FreeCanvasEditor
             ref={freeCanvasRef}
             initialDrawingData={freeDrawingData}
+            initialStrokes={strokes}
+            onUpdateStrokes={setStrokes}
             paperTemplate={paperTemplate}
             selectedTool={proTool}
             currentColor={proColor}
@@ -1009,17 +1047,36 @@ export const NoteEditorModal: React.FC = () => {
               if (curMode === 'behind-text') {
                 return (
                   <View style={styles.behindTextEditorBox}>
-                    <Image
-                      source={{ uri: curImg.uri }}
-                      style={[
-                        StyleSheet.absoluteFillObject,
-                        {
-                          opacity: curImg.opacity ?? 0.35,
-                          borderRadius: 12,
-                        },
-                      ]}
-                      resizeMode="cover"
-                    />
+                    {curImg.uri && curImg.uri.startsWith('data:image/svg+xml;utf8,') ? (
+                      <View
+                        style={[
+                          StyleSheet.absoluteFillObject,
+                          {
+                            opacity: curImg.opacity ?? 0.35,
+                            borderRadius: 12,
+                            overflow: 'hidden',
+                          },
+                        ]}
+                      >
+                        <SvgXml
+                          xml={decodeURIComponent(curImg.uri.replace('data:image/svg+xml;utf8,', ''))}
+                          width="100%"
+                          height="100%"
+                        />
+                      </View>
+                    ) : (
+                      <Image
+                        source={{ uri: curImg.uri }}
+                        style={[
+                          StyleSheet.absoluteFillObject,
+                          {
+                            opacity: curImg.opacity ?? 0.35,
+                            borderRadius: 12,
+                          },
+                        ]}
+                        resizeMode="cover"
+                      />
+                    )}
                     <TextInput
                       ref={contentInputRef}
                       style={[
@@ -1197,12 +1254,20 @@ export const NoteEditorModal: React.FC = () => {
                   음성 녹음 메모 ({audioNotes.length})
                 </Text>
               </View>
-              {audioNotes.map((audio) => (
+              {audioNotes.map((audio, idx) => (
                 <AudioPlayerBar
                   key={audio.id}
                   audio={audio}
+                  index={idx}
+                  totalCount={audioNotes.length}
+                  isPdfNote={false}
                   accentColor={activeColorConfig.text}
                   onDelete={() => setAudioNotes((prev) => prev.filter((a) => a.id !== audio.id))}
+                  onUpdateTitle={(newTitle) =>
+                    setAudioNotes((prev) =>
+                      prev.map((a) => (a.id === audio.id ? { ...a, title: newTitle } : a))
+                    )
+                  }
                 />
               ))}
             </View>
@@ -1712,6 +1777,7 @@ export const NoteEditorModal: React.FC = () => {
                     { id: 'grid', label: '모눈' },
                     { id: 'dot', label: '도트' },
                     { id: 'cornell', label: '코넬' },
+                    { id: 'dark', label: '다크칠판' },
                   ] as const
                 ).map((p) => (
                   <TouchableOpacity
@@ -1733,6 +1799,18 @@ export const NoteEditorModal: React.FC = () => {
             </View>
           </View>
         )}
+
+        {/* DrawNote / ColorNote 실시간 글자수 & 단어수 & 체크 카운터 바 */}
+        <View
+          style={[
+            styles.wordCountBar,
+            { backgroundColor: activeColorConfig.bg, borderTopColor: activeColorConfig.cardBorder },
+          ]}
+        >
+          <Text style={[styles.wordCountText, { color: activeColorConfig.textMuted }]}>
+            글자 <Text style={{ fontWeight: '700', color: activeColorConfig.text }}>{(title + content).length}</Text>자  •  단어 <Text style={{ fontWeight: '700', color: activeColorConfig.text }}>{content.trim() ? content.trim().split(/\s+/).length : 0}</Text>개{checklist.length > 0 ? `  •  체크 ${checklist.filter((c) => c.completed).length}/${checklist.length}` : ''}
+          </Text>
+        </View>
 
         {/* Bottom Floating Quick Action Bar */}
         <View
@@ -2500,6 +2578,17 @@ const styles = StyleSheet.create({
   },
   typoSegmentTextActive: {
     color: '#FFFFFF',
+  },
+  wordCountBar: {
+    paddingHorizontal: 16,
+    paddingVertical: 5,
+    borderTopWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  wordCountText: {
+    fontSize: 11,
+    letterSpacing: 0.2,
   },
   bottomToolbar: {
     flexDirection: 'row',

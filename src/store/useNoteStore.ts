@@ -15,6 +15,7 @@ import {
   SortOption,
   EditorTab,
   EditorMode,
+  FreeHandStroke,
 } from '../types/note';
 import { DEFAULT_BOARDS } from '../constants/colors';
 import { INITIAL_MOCK_NOTES } from '../constants/mockData';
@@ -24,6 +25,7 @@ const STORAGE_KEY_BOARDS = '@stickycraft_boards_v1';
 const STORAGE_KEY_VIEWMODE = '@stickycraft_viewmode_v1';
 const STORAGE_KEY_WIDGETS = '@stickycraft_widgets_v1';
 const STORAGE_KEY_PIN = '@stickycraft_master_pin_v1';
+const STORAGE_KEY_CANVAS_STROKES = '@stickycraft_canvas_strokes_v1';
 
 interface NoteState {
   notes: Note[];
@@ -110,6 +112,24 @@ interface NoteState {
   toggleFilterChecklist: () => void;
   resetFilters: () => void;
   setIsSearchOpen: (open: boolean) => void;
+  setListLayout: (layout: 'grid' | 'list') => void;
+
+  // ColorNote 체크리스트 전용 액션
+  checkAllChecklist: (noteId: string) => void;
+  uncheckAllChecklist: (noteId: string) => void;
+  toggleAutoSortChecked: (noteId: string) => void;
+
+  // 벤치마크 1:1 전용 에디터 및 작업 공간 상태
+  activeEditorType: 'text' | 'checklist' | 'canvas' | 'pdf' | null;
+  isCreateNoteSheetOpen: boolean;
+  selectedNoteForDedicatedEditor: Note | null;
+  openCreateNoteSheet: () => void;
+  closeCreateNoteSheet: () => void;
+  openColorNoteTextEditor: (note?: Note | null) => void;
+  openColorNoteChecklistEditor: (note?: Note | null) => void;
+  openCanvasWorkspace: (note?: Note | null) => void;
+  openPdfWorkspace: (note?: Note | null) => void;
+  closeDedicatedEditor: () => void;
 
   // Modals
   openNewNoteEditor: (initialMode?: EditorMode | any, initialTabType?: EditorTab['type']) => void;
@@ -141,6 +161,12 @@ interface NoteState {
   exportAllData: () => string;
   importAllData: (jsonData: string) => boolean;
   resetToMockData: () => Promise<void>;
+
+  // DrawNote 화이트보드 캔버스 필기 및 연결선
+  canvasBoardStrokes: FreeHandStroke[];
+  addCanvasBoardStroke: (stroke: FreeHandStroke) => void;
+  setCanvasBoardStrokes: (strokes: FreeHandStroke[]) => void;
+  clearCanvasBoardStrokes: () => void;
 }
 
 const initialFilters: FilterOptions = {
@@ -153,6 +179,7 @@ const initialFilters: FilterOptions = {
   sortBy: 'updated',
   showArchived: false,
   showTrash: false,
+  listLayout: 'grid',
 };
 
 export const useNoteStore = create<NoteState>((set, get) => ({
@@ -180,6 +207,48 @@ export const useNoteStore = create<NoteState>((set, get) => ({
   isTrashModalOpen: false,
   trashModalInitialTab: 'trash',
 
+  // 벤치마크 1:1 전용 에디터 및 작업 공간 상태
+  activeEditorType: null,
+  isCreateNoteSheetOpen: false,
+  selectedNoteForDedicatedEditor: null,
+
+  openCreateNoteSheet: () => set({ isCreateNoteSheetOpen: true }),
+  closeCreateNoteSheet: () => set({ isCreateNoteSheetOpen: false }),
+
+  openColorNoteTextEditor: (note = null) =>
+    set({
+      activeEditorType: 'text',
+      selectedNoteForDedicatedEditor: note,
+      isCreateNoteSheetOpen: false,
+    }),
+
+  openColorNoteChecklistEditor: (note = null) =>
+    set({
+      activeEditorType: 'checklist',
+      selectedNoteForDedicatedEditor: note,
+      isCreateNoteSheetOpen: false,
+    }),
+
+  openCanvasWorkspace: (note = null) =>
+    set({
+      activeEditorType: 'canvas',
+      selectedNoteForDedicatedEditor: note,
+      isCreateNoteSheetOpen: false,
+    }),
+
+  openPdfWorkspace: (note = null) =>
+    set({
+      activeEditorType: 'pdf',
+      selectedNoteForDedicatedEditor: note,
+      isCreateNoteSheetOpen: false,
+    }),
+
+  closeDedicatedEditor: () =>
+    set({
+      activeEditorType: null,
+      selectedNoteForDedicatedEditor: null,
+    }),
+
   // 탭 및 모드 시스템
   editorMode: 'text',
   editorTabs: [{ id: 'tab_default', title: '새 메모', type: 'note' }],
@@ -187,14 +256,18 @@ export const useNoteStore = create<NoteState>((set, get) => ({
   capturedSnippet: null,
   isDeviceSyncModalOpen: false,
 
+  // DrawNote 화이트보드 캔버스 필기
+  canvasBoardStrokes: [],
+
   loadInitialData: async () => {
     try {
-      const [savedNotes, savedBoards, savedViewMode, savedWidgets, savedPin] = await Promise.all([
+      const [savedNotes, savedBoards, savedViewMode, savedWidgets, savedPin, savedCanvasStrokes] = await Promise.all([
         AsyncStorage.getItem(STORAGE_KEY_NOTES),
         AsyncStorage.getItem(STORAGE_KEY_BOARDS),
         AsyncStorage.getItem(STORAGE_KEY_VIEWMODE),
         AsyncStorage.getItem(STORAGE_KEY_WIDGETS),
         AsyncStorage.getItem(STORAGE_KEY_PIN),
+        AsyncStorage.getItem(STORAGE_KEY_CANVAS_STROKES),
       ]);
 
       let finalNotes = INITIAL_MOCK_NOTES;
@@ -207,6 +280,44 @@ export const useNoteStore = create<NoteState>((set, get) => ({
         } catch (e) {
           console.warn('Failed to parse saved notes, using initial mock data', e);
         }
+      }
+
+      // 오디오 메모 스마트 정규화: 기존 데이터에 제목이나 페이지가 누락된 경우 자동 보정
+      let hasMigratedAudios = false;
+      finalNotes = finalNotes.map((n) => {
+        if (!n.audioNotes || n.audioNotes.length === 0) return n;
+        const isPdf =
+          n.noteType === 'pdf' ||
+          Boolean(n.pdfName) ||
+          Boolean(n.pdfUri) ||
+          Boolean(n.title?.toLowerCase().includes('.pdf'));
+
+        const updatedAudios = n.audioNotes.map((a, idx) => {
+          let updated = { ...a };
+          let changed = false;
+          // 1. PDF 문서인 경우 pageIndex 기본값 1 보장
+          if (isPdf && updated.pageIndex === undefined) {
+            updated.pageIndex = 1;
+            changed = true;
+          }
+          // 2. 제목이 누락되었거나 generic "음성 메모"인 경우 자동 부여
+          if (!updated.title || updated.title.trim() === '' || updated.title === '음성 메모') {
+            if (updated.pageIndex !== undefined) {
+              updated.title = `P.${updated.pageIndex} 음성 메모${n.audioNotes!.length > 1 ? ` #${idx + 1}` : ''}`;
+            } else {
+              updated.title = `녹음 ${idx + 1}`;
+            }
+            changed = true;
+          }
+          if (changed) hasMigratedAudios = true;
+          return updated;
+        });
+
+        return { ...n, audioNotes: updatedAudios };
+      });
+
+      if (hasMigratedAudios) {
+        AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(finalNotes)).catch(() => {});
       }
 
       let finalBoards = DEFAULT_BOARDS;
@@ -232,12 +343,25 @@ export const useNoteStore = create<NoteState>((set, get) => ({
         }
       }
 
+      let finalCanvasStrokes: FreeHandStroke[] = [];
+      if (savedCanvasStrokes) {
+        try {
+          const parsedStrokes = JSON.parse(savedCanvasStrokes);
+          if (Array.isArray(parsedStrokes)) {
+            finalCanvasStrokes = parsedStrokes;
+          }
+        } catch (e) {
+          console.warn('Failed to parse saved canvas strokes', e);
+        }
+      }
+
       set({
         notes: finalNotes,
         boards: finalBoards,
         viewMode: finalViewMode,
         widgets: finalWidgets,
         masterPin: savedPin || null,
+        canvasBoardStrokes: finalCanvasStrokes,
         isLoading: false,
       });
     } catch (error) {
@@ -369,6 +493,49 @@ export const useNoteStore = create<NoteState>((set, get) => ({
     set((s) => ({ filters: { ...s.filters, sortBy: sort } }));
   },
 
+  // ColorNote 기능: 그리드 / 리스트 레이아웃 토글
+  setListLayout: (layout) => {
+    set((s) => ({ filters: { ...s.filters, listLayout: layout } }));
+  },
+
+  // ColorNote 기능: 체크리스트 전체 완료/해제/자동정렬
+  checkAllChecklist: (noteId) => {
+    const state = get();
+    const updatedNotes = state.notes.map((note) => {
+      if (note.id !== noteId) return note;
+      const updatedChecklist = (note.checklist || []).map((item) => ({ ...item, completed: true }));
+      return { ...note, checklist: updatedChecklist, updatedAt: Date.now() };
+    });
+    set({ notes: updatedNotes });
+    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+  },
+
+  uncheckAllChecklist: (noteId) => {
+    const state = get();
+    const updatedNotes = state.notes.map((note) => {
+      if (note.id !== noteId) return note;
+      const updatedChecklist = (note.checklist || []).map((item) => ({ ...item, completed: false }));
+      return { ...note, checklist: updatedChecklist, updatedAt: Date.now() };
+    });
+    set({ notes: updatedNotes });
+    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+  },
+
+  toggleAutoSortChecked: (noteId) => {
+    const state = get();
+    const updatedNotes = state.notes.map((note) => {
+      if (note.id !== noteId) return note;
+      const willSort = !note.autoSortChecked;
+      let list = [...(note.checklist || [])];
+      if (willSort) {
+        list.sort((a, b) => (a.completed === b.completed ? 0 : a.completed ? 1 : -1));
+      }
+      return { ...note, autoSortChecked: willSort, checklist: list, updatedAt: Date.now() };
+    });
+    set({ notes: updatedNotes });
+    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+  },
+
   // ColorNote 기능 6: 캘린더 날짜
   setSelectedCalendarDate: (date) => {
     set({ selectedCalendarDate: date });
@@ -443,9 +610,12 @@ export const useNoteStore = create<NoteState>((set, get) => ({
     const state = get();
     const updatedNotes = state.notes.map((note) => {
       if (note.id !== noteId) return note;
-      const updatedChecklist = note.checklist.map((item) =>
+      let updatedChecklist = note.checklist.map((item) =>
         item.id === itemId ? { ...item, completed: !item.completed } : item
       );
+      if (note.autoSortChecked) {
+        updatedChecklist.sort((a, b) => (a.completed === b.completed ? 0 : a.completed ? 1 : -1));
+      }
       return { ...note, checklist: updatedChecklist, updatedAt: Date.now() };
     });
     set({ notes: updatedNotes });
@@ -516,40 +686,53 @@ export const useNoteStore = create<NoteState>((set, get) => ({
   setIsSearchOpen: (open) => set({ isSearchOpen: open }),
 
   openNewNoteEditor: (initialMode = 'text', initialTabType = 'note') => {
-    const safeMode: EditorMode = initialMode === 'free' ? 'free' : 'text';
-    const safeTabType: EditorTab['type'] =
-      initialTabType === 'pdf' ? 'pdf' : initialTabType === 'canvas' ? 'canvas' : 'note';
-    const tabId = 'tab_' + safeTabType + '_' + Date.now();
-    const defaultTab: EditorTab = {
-      id: tabId,
-      title: safeTabType === 'pdf' ? 'PDF 문서' : safeTabType === 'canvas' ? '자유 필기장' : '새 메모',
-      type: safeTabType,
-    };
-    set({
-      selectedNoteForEdit: null,
-      isEditorOpen: true,
-      editorTabs: [defaultTab],
-      activeEditorTabId: tabId,
-      editorMode: safeMode,
-    });
+    if (initialMode === 'free' || initialTabType === 'canvas') {
+      get().openCanvasWorkspace(null);
+    } else if (initialTabType === 'pdf') {
+      get().openPdfWorkspace(null);
+    } else {
+      get().openCreateNoteSheet();
+    }
   },
   openEditNoteEditor: (note) => {
-    const defaultTab: EditorTab = {
-      id: 'tab_note_' + note.id,
-      title: note.title || '메모',
-      type: 'note',
-      noteId: note.id,
-      freeDrawingData: note.freeDrawingData,
-    };
+    // 벤치마크 1:1 라우팅
+    // 1) 체크리스트 메모
+    if (note.noteType === 'checklist' || (note.checklist && note.checklist.length > 0)) {
+      set({
+        activeEditorType: 'checklist',
+        selectedNoteForDedicatedEditor: note,
+      });
+      return;
+    }
+    // 2) PDF 문서 메모
+    if (note.noteType === 'pdf' || note.pdfUri || note.title?.toLowerCase().includes('.pdf')) {
+      set({
+        activeEditorType: 'pdf',
+        selectedNoteForDedicatedEditor: note,
+      });
+      return;
+    }
+    // 3) 손글씨 캔버스 메모
+    if (note.noteType === 'canvas' || (note.strokes && note.strokes.length > 0) || note.freeDrawingData) {
+      set({
+        activeEditorType: 'canvas',
+        selectedNoteForDedicatedEditor: note,
+      });
+      return;
+    }
+    // 4) 기본 텍스트 메모 -> ColorNote 줄노트 에디터
     set({
-      selectedNoteForEdit: note,
-      isEditorOpen: true,
-      editorTabs: [defaultTab],
-      activeEditorTabId: defaultTab.id,
-      editorMode: note.editorMode || (note.freeDrawingData ? 'free' : 'text'),
+      activeEditorType: 'text',
+      selectedNoteForDedicatedEditor: note,
     });
   },
-  closeEditor: () => set({ selectedNoteForEdit: null, isEditorOpen: false }),
+  closeEditor: () =>
+    set({
+      selectedNoteForEdit: null,
+      isEditorOpen: false,
+      activeEditorType: null,
+      selectedNoteForDedicatedEditor: null,
+    }),
 
   // 탭 & 모드 & 캡처 액션
   setEditorMode: (mode) => set({ editorMode: mode }),
@@ -634,8 +817,26 @@ export const useNoteStore = create<NoteState>((set, get) => ({
   },
 
   resetToMockData: async () => {
-    set({ notes: INITIAL_MOCK_NOTES, boards: DEFAULT_BOARDS, activeBoardId: 'all' });
+    set({ notes: INITIAL_MOCK_NOTES, boards: DEFAULT_BOARDS, activeBoardId: 'all', canvasBoardStrokes: [] });
     await AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(INITIAL_MOCK_NOTES));
     await AsyncStorage.setItem(STORAGE_KEY_BOARDS, JSON.stringify(DEFAULT_BOARDS));
+    await AsyncStorage.setItem(STORAGE_KEY_CANVAS_STROKES, JSON.stringify([]));
+  },
+
+  // DrawNote 화이트보드 캔버스 필기 및 연결선
+  addCanvasBoardStroke: (stroke: FreeHandStroke) => {
+    const next = [...get().canvasBoardStrokes, stroke];
+    set({ canvasBoardStrokes: next });
+    AsyncStorage.setItem(STORAGE_KEY_CANVAS_STROKES, JSON.stringify(next)).catch(console.error);
+  },
+
+  setCanvasBoardStrokes: (strokes: FreeHandStroke[]) => {
+    set({ canvasBoardStrokes: strokes });
+    AsyncStorage.setItem(STORAGE_KEY_CANVAS_STROKES, JSON.stringify(strokes)).catch(console.error);
+  },
+
+  clearCanvasBoardStrokes: () => {
+    set({ canvasBoardStrokes: [] });
+    AsyncStorage.setItem(STORAGE_KEY_CANVAS_STROKES, JSON.stringify([])).catch(console.error);
   },
 }));

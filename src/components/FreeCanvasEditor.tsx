@@ -15,9 +15,10 @@ import {
 import Svg, { Path as SvgPath } from 'react-native-svg';
 import { ActiveToolType } from './ProToolbar';
 import { PaperTemplatePattern } from './PaperTemplatePattern';
-import { PaperTemplate, FreeTextBox, NoteImage, AudioNote } from '../types/note';
+import { PaperTemplate, FreeTextBox, NoteImage, AudioNote, FreeHandStroke } from '../types/note';
 import { AudioPlayerBar } from './AudioPlayerBar';
 import { X, Check, Move, Maximize2, Mic, Image as ImageIcon, Volume2 } from 'lucide-react-native';
+import { recognizeShape, tryRecognizeMultiStroke } from '../utils/shapeRecognizer';
 
 export interface FreeCanvasEditorRef {
   undo: () => void;
@@ -30,12 +31,14 @@ export interface FreeCanvasEditorRef {
 
 interface FreeCanvasEditorProps {
   initialDrawingData?: string;
+  initialStrokes?: FreeHandStroke[];
   paperTemplate?: PaperTemplate;
   selectedTool: ActiveToolType;
   currentColor: string;
   currentWidth: number;
   isRulerActive: boolean;
-  onUpdateDrawing: (dataUrl: string) => void;
+  onUpdateDrawing?: (dataUrl: string) => void;
+  onUpdateStrokes?: (strokes: FreeHandStroke[]) => void;
   canUndoState?: (canUndo: boolean, canRedo: boolean) => void;
 
   // 자유 캔버스 위 사진/캡처본 & 음성 녹음
@@ -57,18 +60,30 @@ interface Stroke {
   width: number;
   tool: ActiveToolType;
   isRuler?: boolean;
+  isPolygon?: boolean;
+  shapeType?: 'rect' | 'circle' | 'arrow' | 'line' | 'triangle';
 }
+
+const mapShapeType = (t: string | null): 'rect' | 'circle' | 'line' | 'triangle' | undefined => {
+  if (t === 'rectangle') return 'rect';
+  if (t === 'circle') return 'circle';
+  if (t === 'line') return 'line';
+  if (t === 'triangle') return 'triangle';
+  return undefined;
+};
 
 export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditorProps>(
   (
     {
       initialDrawingData,
+      initialStrokes = [],
       paperTemplate = 'blank',
       selectedTool,
       currentColor,
       currentWidth,
       isRulerActive,
       onUpdateDrawing,
+      onUpdateStrokes,
       canUndoState,
       images,
       onUpdateImages,
@@ -79,7 +94,7 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
   ) => {
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-    const [strokes, setStrokes] = useState<Stroke[]>([]);
+    const [strokes, setStrokes] = useState<Stroke[]>(initialStrokes as Stroke[]);
     const [redoStack, setRedoStack] = useState<Stroke[]>([]);
     const [currentStroke, setCurrentStroke] = useState<Stroke | null>(null);
 
@@ -94,17 +109,21 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
     const canvasWidth = 820;
     const canvasHeight = 1160;
 
-    // Undo / Redo 상위 보고
+    // Undo / Redo 상위 보고 및 스트로크 영속 동기화
     useEffect(() => {
       if (canUndoState) {
         canUndoState(strokes.length > 0, redoStack.length > 0);
+      }
+      if (onUpdateStrokes) {
+        onUpdateStrokes(strokes as any);
       }
     }, [strokes, redoStack]);
 
     const handleUndo = () => {
       if (strokes.length === 0) return;
       const last = strokes[strokes.length - 1];
-      setStrokes((prev) => prev.slice(0, prev.length - 1));
+      const nextStrokes = strokes.slice(0, strokes.length - 1);
+      setStrokes(nextStrokes);
       setRedoStack((prev) => [...prev, last]);
     };
 
@@ -122,6 +141,7 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
         setStrokes([]);
         setRedoStack([]);
         setTextBoxes([]);
+        if (onUpdateStrokes) onUpdateStrokes([]);
       },
       pasteSnippet: (snippetDataUrl: string) => {
         const newImg: NoteImage = {
@@ -154,7 +174,7 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
       },
     }));
 
-    // 웹 HTML5 캔버스 렌더링
+    // 웹 HTML5 캔버스 렌더링 (베지어 곡선 보간)
     const redrawCanvas = () => {
       if (Platform.OS !== 'web') return;
       const canvas = canvasRef.current;
@@ -165,17 +185,18 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       for (const stroke of strokes) {
-        if (stroke.points.length < 2) continue;
+        if (stroke.points.length === 0) continue;
 
         ctx.save();
         ctx.beginPath();
         ctx.moveTo(stroke.points[0].x, stroke.points[0].y);
 
         if (stroke.tool === 'highlighter') {
-          ctx.globalAlpha = 0.45;
+          ctx.globalAlpha = 0.4;
           ctx.strokeStyle = stroke.color;
           ctx.lineWidth = stroke.width * 2.5;
           ctx.lineCap = 'square';
+          ctx.lineJoin = 'miter';
         } else {
           ctx.globalAlpha = 1.0;
           ctx.strokeStyle = stroke.color;
@@ -184,13 +205,18 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
           ctx.lineJoin = 'round';
         }
 
-        if (stroke.isRuler) {
+        if (stroke.isRuler || stroke.points.length === 2) {
           const last = stroke.points[stroke.points.length - 1];
           ctx.lineTo(last.x, last.y);
         } else {
-          for (let i = 1; i < stroke.points.length; i++) {
-            ctx.lineTo(stroke.points[i].x, stroke.points[i].y);
+          // Quadratic Bézier curve smoothing
+          for (let i = 1; i < stroke.points.length - 1; i++) {
+            const xc = (stroke.points[i].x + stroke.points[i + 1].x) / 2;
+            const yc = (stroke.points[i].y + stroke.points[i + 1].y) / 2;
+            ctx.quadraticCurveTo(stroke.points[i].x, stroke.points[i].y, xc, yc);
           }
+          const last = stroke.points[stroke.points.length - 1];
+          ctx.lineTo(last.x, last.y);
         }
 
         ctx.stroke();
@@ -211,17 +237,61 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
       redrawCanvas();
     }, [strokes]);
 
-    // 스트로크를 SVG Path로 변환 (모바일 네이티브 렌더링용)
+    // 스트로크를 Quadratic Bézier SVG Path 또는 직선 다각형으로 변환 (모바일/웹 네이티브 렌더링용)
     const strokeToSvgPath = (stroke: Stroke) => {
-      if (stroke.points.length === 0) return '';
-      if (stroke.isRuler && stroke.points.length >= 2) {
-        const first = stroke.points[0];
-        const last = stroke.points[stroke.points.length - 1];
+      const points = stroke.points;
+      if (!points || points.length === 0) return '';
+      if ((stroke.isRuler || points.length === 2) && points.length >= 2) {
+        const first = points[0];
+        const last = points[points.length - 1];
         return `M ${first.x} ${first.y} L ${last.x} ${last.y}`;
       }
-      return stroke.points.reduce((acc, pt, i) => {
-        return i === 0 ? `M ${pt.x} ${pt.y}` : `${acc} L ${pt.x} ${pt.y}`;
-      }, '');
+
+      // 원형 (Circle / Ellipse): 수학적으로 정확한 SVG Arc 명령어로 매끄럽게 렌더링
+      if (stroke.shapeType === 'circle') {
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        for (const p of points) {
+          if (p.x < minX) minX = p.x;
+          if (p.x > maxX) maxX = p.x;
+          if (p.y < minY) minY = p.y;
+          if (p.y > maxY) maxY = p.y;
+        }
+        const cx = (minX + maxX) / 2;
+        const cy = (minY + maxY) / 2;
+        const rx = Math.max(2, (maxX - minX) / 2);
+        const ry = Math.max(2, (maxY - minY) / 2);
+        return `M ${cx - rx} ${cy} A ${rx} ${ry} 0 1 0 ${cx + rx} ${cy} A ${rx} ${ry} 0 1 0 ${cx - rx} ${cy} Z`;
+      }
+
+      // 직사각형, 삼각형 등 다각형이거나 끝점과 시작점이 일치하는 닫힌 다각형 점군인 경우
+      const isClosedPoly =
+        stroke.isPolygon ||
+        stroke.shapeType === 'rect' ||
+        stroke.shapeType === 'triangle' ||
+        (points.length >= 4 &&
+          points.length <= 8 &&
+          Math.hypot(points[0].x - points[points.length - 1].x, points[0].y - points[points.length - 1].y) < 2);
+
+      if (isClosedPoly) {
+        let polyPath = `M ${points[0].x} ${points[0].y}`;
+        for (let i = 1; i < points.length; i++) {
+          polyPath += ` L ${points[i].x} ${points[i].y}`;
+        }
+        return polyPath + ' Z';
+      }
+
+      if (points.length === 1) {
+        return `M ${points[0].x} ${points[0].y} L ${points[0].x + 0.5} ${points[0].y + 0.5}`;
+      }
+      let path = `M ${points[0].x} ${points[0].y}`;
+      for (let i = 1; i < points.length - 1; i++) {
+        const xc = (points[i].x + points[i + 1].x) / 2;
+        const yc = (points[i].y + points[i + 1].y) / 2;
+        path += ` Q ${points[i].x} ${points[i].y}, ${xc} ${yc}`;
+      }
+      const last = points[points.length - 1];
+      path += ` L ${last.x} ${last.y}`;
+      return path;
     };
 
     // 모바일 터치 제스처 (PanResponder)
@@ -233,7 +303,10 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
           const { locationX, locationY } = evt.nativeEvent;
           if (selectedTool === 'eraser') {
             setStrokes((prev) =>
-              prev.filter((st) => !st.points.some((p) => Math.hypot(p.x - locationX, p.y - locationY) < 22))
+              prev.filter(
+                (st) =>
+                  !st.points.some((p) => Math.hypot(p.x - locationX, p.y - locationY) < 24)
+              )
             );
             return;
           }
@@ -251,7 +324,10 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
           const { locationX, locationY } = evt.nativeEvent;
           if (selectedTool === 'eraser') {
             setStrokes((prev) =>
-              prev.filter((st) => !st.points.some((p) => Math.hypot(p.x - locationX, p.y - locationY) < 22))
+              prev.filter(
+                (st) =>
+                  !st.points.some((p) => Math.hypot(p.x - locationX, p.y - locationY) < 24)
+              )
             );
             return;
           }
@@ -262,8 +338,47 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
         },
         onPanResponderRelease: () => {
           if (currentStroke && currentStroke.points.length > 1) {
-            setStrokes((prev) => [...prev, currentStroke]);
+            let finalStroke = currentStroke;
+
+            // Notewise & Goodnotes 스마트 도형 자동 인식 (선, 사각형, 원)
+            if (selectedTool === 'shape' || isRulerActive) {
+              const multiResult = tryRecognizeMultiStroke(strokes, currentStroke, 50);
+              if (multiResult) {
+                const { recognized, mergedStrokeIds } = multiResult;
+                const mergedIdSet = new Set(mergedStrokeIds);
+                const mergedStroke: Stroke = {
+                  ...currentStroke,
+                  id: 'shape_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
+                  points: recognized.points,
+                  isRuler: recognized.type === 'line',
+                  shapeType: mapShapeType(recognized.type),
+                  isPolygon: recognized.isPolygon ?? (recognized.type === 'rectangle' || recognized.type === 'triangle'),
+                };
+                const remaining = strokes.filter((s) => !mergedIdSet.has(s.id));
+                const updated = [...remaining, mergedStroke];
+                setStrokes(updated);
+                setRedoStack([]);
+                if (onUpdateStrokes) onUpdateStrokes(updated as any);
+                setCurrentStroke(null);
+                return;
+              }
+
+              const recognized = recognizeShape(currentStroke.points);
+              if (recognized) {
+                finalStroke = {
+                  ...currentStroke,
+                  points: recognized.points,
+                  isRuler: recognized.type === 'line',
+                  shapeType: mapShapeType(recognized.type),
+                  isPolygon: recognized.isPolygon ?? (recognized.type === 'rectangle' || recognized.type === 'triangle'),
+                };
+              }
+            }
+
+            const updated = [...strokes, finalStroke];
+            setStrokes(updated);
             setRedoStack([]);
+            if (onUpdateStrokes) onUpdateStrokes(updated as any);
           }
           setCurrentStroke(null);
         },
@@ -280,7 +395,13 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
           showsHorizontalScrollIndicator={true}
         >
           {/* 가상 양식 용지 (A4 비율 노트 시트) */}
-          <View style={[styles.paperSheet, { width: canvasWidth, minHeight: canvasHeight }]}>
+          <View
+            style={[
+              styles.paperSheet,
+              { width: canvasWidth, minHeight: canvasHeight },
+              paperTemplate === 'dark' && { backgroundColor: '#1E293B' },
+            ]}
+          >
             {/* 1. 속지 패턴 배경 */}
             <PaperTemplatePattern template={paperTemplate} />
 
@@ -293,11 +414,19 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
                     첨부된 음성 녹음 메모 ({audioNotes.length}개)
                   </Text>
                 </View>
-                {audioNotes.map((audio) => (
+                {audioNotes.map((audio, idx) => (
                   <AudioPlayerBar
                     key={audio.id}
                     audio={audio}
+                    index={idx}
+                    totalCount={audioNotes.length}
+                    isPdfNote={false}
                     onDelete={() => onUpdateAudioNotes(audioNotes.filter((a) => a.id !== audio.id))}
+                    onUpdateTitle={(newTitle) =>
+                      onUpdateAudioNotes(
+                        audioNotes.map((a) => (a.id === audio.id ? { ...a, title: newTitle } : a))
+                      )
+                    }
                     accentColor="#2563eb"
                   />
                 ))}
@@ -375,7 +504,9 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
 
                   if (selectedTool === 'eraser') {
                     setStrokes((prev) =>
-                      prev.filter((st) => !st.points.some((p) => Math.hypot(p.x - x, p.y - y) < 22))
+                      prev.filter(
+                        (st) => !st.points.some((p) => Math.hypot(p.x - x, p.y - y) < 24)
+                      )
                     );
                     return;
                   }
@@ -403,8 +534,46 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
                 }}
                 onPointerUp={() => {
                   if (currentStroke && currentStroke.points.length > 1) {
-                    setStrokes((prev) => [...prev, currentStroke]);
+                    let finalStroke = currentStroke;
+
+                    if (selectedTool === 'shape' || isRulerActive) {
+                      const multiResult = tryRecognizeMultiStroke(strokes, currentStroke, 50);
+                      if (multiResult) {
+                        const { recognized, mergedStrokeIds } = multiResult;
+                        const mergedIdSet = new Set(mergedStrokeIds);
+                        const mergedStroke: Stroke = {
+                          ...currentStroke,
+                          id: 'shape_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
+                          points: recognized.points,
+                          isRuler: recognized.type === 'line',
+                          shapeType: mapShapeType(recognized.type),
+                          isPolygon: recognized.isPolygon ?? (recognized.type === 'rectangle' || recognized.type === 'triangle'),
+                        };
+                        const remaining = strokes.filter((s) => !mergedIdSet.has(s.id));
+                        const updated = [...remaining, mergedStroke];
+                        setStrokes(updated);
+                        setRedoStack([]);
+                        if (onUpdateStrokes) onUpdateStrokes(updated as any);
+                        setCurrentStroke(null);
+                        return;
+                      }
+
+                      const recognized = recognizeShape(currentStroke.points);
+                      if (recognized) {
+                        finalStroke = {
+                          ...currentStroke,
+                          points: recognized.points,
+                          isRuler: recognized.type === 'line',
+                          shapeType: mapShapeType(recognized.type),
+                          isPolygon: recognized.isPolygon ?? (recognized.type === 'rectangle' || recognized.type === 'triangle'),
+                        };
+                      }
+                    }
+
+                    const updated = [...strokes, finalStroke];
+                    setStrokes(updated);
                     setRedoStack([]);
+                    if (onUpdateStrokes) onUpdateStrokes(updated as any);
                   }
                   setCurrentStroke(null);
                 }}
@@ -440,7 +609,7 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
                           ? stroke.width * 1.3
                           : stroke.width
                       }
-                      strokeOpacity={stroke.tool === 'highlighter' ? 0.45 : 1.0}
+                      strokeOpacity={stroke.tool === 'highlighter' ? 0.4 : 1.0}
                       strokeLinecap="round"
                       strokeLinejoin="round"
                       fill="none"
@@ -455,7 +624,7 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
                           ? currentStroke.width * 2.5
                           : currentStroke.width
                       }
-                      strokeOpacity={currentStroke.tool === 'highlighter' ? 0.45 : 1.0}
+                      strokeOpacity={currentStroke.tool === 'highlighter' ? 0.4 : 1.0}
                       strokeLinecap="round"
                       strokeLinejoin="round"
                       fill="none"
@@ -518,53 +687,56 @@ const styles = StyleSheet.create({
     paddingVertical: 24,
     alignItems: 'center',
     justifyContent: 'center',
+    minWidth: '100%',
   },
   paperSheet: {
     backgroundColor: '#ffffff',
     borderRadius: 8,
-    overflow: 'hidden',
-    position: 'relative',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.15,
-    shadowRadius: 24,
-    elevation: 6,
+    shadowRadius: 16,
+    elevation: 8,
+    position: 'relative',
+    overflow: 'hidden',
   },
   audioSection: {
-    position: 'relative',
-    zIndex: 25,
-    marginHorizontal: 20,
-    marginTop: 14,
-    marginBottom: 8,
-    gap: 8,
+    margin: 16,
+    padding: 12,
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    zIndex: 10,
   },
   audioSectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+    marginBottom: 8,
   },
   audioSectionTitle: {
     fontSize: 12,
     fontWeight: '700',
-    color: '#1e293b',
+    color: '#334155',
   },
   imageCard: {
     position: 'absolute',
+    backgroundColor: '#ffffff',
     borderRadius: 8,
     overflow: 'hidden',
-    backgroundColor: '#ffffff',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 6,
     elevation: 4,
   },
   imageCardHeader: {
-    height: 28,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 8,
+    paddingVertical: 4,
   },
   imageCardTitleRow: {
     flexDirection: 'row',
@@ -573,7 +745,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   imageCardTitle: {
-    fontSize: 11,
+    fontSize: 10.5,
     fontWeight: '600',
     color: '#ffffff',
   },
@@ -581,35 +753,38 @@ const styles = StyleSheet.create({
     padding: 2,
   },
   imageElement: {
-    flex: 1,
     width: '100%',
-    backgroundColor: '#f8fafc',
+    height: '100%',
+    backgroundColor: '#f1f5f9',
   },
   textBoxCard: {
     position: 'absolute',
-    zIndex: 25,
-    backgroundColor: 'rgba(255, 255, 255, 0.92)',
-    borderWidth: 1,
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    flexDirection: 'row',
-    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    borderRadius: 8,
+    padding: 6,
     minWidth: 120,
+    borderWidth: 1,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
+    shadowOpacity: 0.08,
     shadowRadius: 4,
     elevation: 3,
+    zIndex: 25,
   },
   textInputStyle: {
     fontSize: 14,
     color: '#0f172a',
-    padding: 0,
-    flex: 1,
+    padding: 4,
+    minHeight: 30,
   },
   textDeleteBtn: {
-    padding: 2,
-    marginLeft: 6,
+    position: 'absolute',
+    top: -6,
+    right: -6,
+    backgroundColor: '#fee2e2',
+    borderRadius: 8,
+    padding: 3,
+    borderWidth: 1,
+    borderColor: '#fca5a5',
   },
 });

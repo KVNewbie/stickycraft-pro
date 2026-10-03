@@ -3,5 +3,15 @@
   "compilerOptions": {
     "strict": true,
     "skipLibCheck": true
-  }
+  },
+  "include": [
+    "App.tsx",
+    "index.ts",
+    "src/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "note",
+    "dist"
+  ]
 }

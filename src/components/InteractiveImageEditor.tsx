@@ -9,6 +9,7 @@ import {
   TextInput,
   Platform,
 } from 'react-native';
+import { SvgXml } from 'react-native-svg';
 import {
   Move,
   Maximize2,
@@ -229,12 +230,20 @@ export const InteractiveImageEditor: React.FC<InteractiveImageEditorProps> = ({
             wrapMode === 'behind-text' && styles.behindTextFrame,
           ]}
         >
-          {/* Real Image */}
-          <Image
-            source={{ uri: image.uri }}
-            style={{ width: '100%', height: '100%' }}
-            resizeMode="cover"
-          />
+          {/* Real Image or SVG Drawing */}
+          {image.uri && image.uri.startsWith('data:image/svg+xml;utf8,') ? (
+            <SvgXml
+              xml={decodeURIComponent(image.uri.replace('data:image/svg+xml;utf8,', ''))}
+              width="100%"
+              height="100%"
+            />
+          ) : (
+            <Image
+              source={{ uri: image.uri }}
+              style={{ width: '100%', height: '100%' }}
+              resizeMode="cover"
+            />
+          )}
 
           {/* Current Wrap Mode Badge */}
           {wrapMode !== 'break' && mode === 'idle' && (

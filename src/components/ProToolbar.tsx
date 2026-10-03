@@ -20,11 +20,12 @@ import {
   Layers,
   Palette,
   ChevronDown,
+  Shapes,
 } from 'lucide-react-native';
 import { EditorMode } from '../types/note';
 import { ColorPaletteModal } from './ColorPaletteModal';
 
-export type ActiveToolType = 'pen' | 'fountain' | 'highlighter' | 'eraser' | 'lasso' | 'text';
+export type ActiveToolType = 'pen' | 'fountain' | 'highlighter' | 'eraser' | 'lasso' | 'text' | 'shape';
 
 interface ProToolbarProps {
   onBack: () => void;
@@ -214,6 +215,15 @@ export const ProToolbar: React.FC<ProToolbarProps> = ({
                 accessibilityLabel="텍스트 상자"
               >
                 <Type size={18} color={selectedTool === 'text' ? '#2563eb' : '#475569'} />
+              </TouchableOpacity>
+
+              {/* Notewise & Goodnotes 스마트 도형 (Shapes) */}
+              <TouchableOpacity
+                style={[styles.toolBtn, selectedTool === 'shape' && styles.toolBtnActive]}
+                onPress={() => onSelectTool('shape')}
+                accessibilityLabel="스마트 도형 인식 (Shapes)"
+              >
+                <Shapes size={18} color={selectedTool === 'shape' ? '#7c3aed' : '#475569'} />
               </TouchableOpacity>
 
               {/* 직선 자 (Ruler Mode) */}

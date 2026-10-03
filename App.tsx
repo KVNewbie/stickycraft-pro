@@ -5,8 +5,8 @@ import {
   Text,
   TouchableOpacity,
   ActivityIndicator,
+  Modal,
   Platform,
-  StatusBar as RNStatusBar,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
@@ -18,15 +18,16 @@ import { SearchBar } from './src/components/SearchBar';
 import { GridView } from './src/components/GridView';
 import { CanvasView } from './src/components/CanvasView';
 import { CalendarView } from './src/components/CalendarView';
-import { NoteEditorModal } from './src/components/NoteEditorModal';
+import { CreateNoteBottomSheet } from './src/components/CreateNoteBottomSheet';
+import { ColorNoteTextEditor } from './src/components/ColorNoteTextEditor';
+import { ColorNoteChecklistEditor } from './src/components/ColorNoteChecklistEditor';
+import { DocumentWorkspaceModal } from './src/components/DocumentWorkspaceModal';
 import { ImageViewerModal } from './src/components/ImageViewerModal';
 import { BackupSettingsModal } from './src/components/BackupSettingsModal';
 import { WidgetStudioModal } from './src/components/WidgetStudioModal';
 import { PinLockModal } from './src/components/PinLockModal';
 import { TrashArchiveModal } from './src/components/TrashArchiveModal';
 import { ReminderModal } from './src/components/ReminderModal';
-import { AdBannerSlot } from './src/components/AdBannerSlot';
-import { FloatingSpeedDial } from './src/components/FloatingSpeedDial';
 
 export default function App() {
   const {
@@ -34,7 +35,10 @@ export default function App() {
     isSearchOpen,
     isLoading,
     loadInitialData,
-    openNewNoteEditor,
+    openCreateNoteSheet,
+    activeEditorType,
+    selectedNoteForDedicatedEditor,
+    closeDedicatedEditor,
     isReminderModalOpen,
     reminderTargetNote,
     closeReminderModal,
@@ -79,17 +83,50 @@ export default function App() {
             <CalendarView />
           )}
 
-          {/* Floating Speed Dial FAB (PDF, Canvas, Text, Voice) */}
-          <FloatingSpeedDial />
+          {/* Floating Action Button (DrawNote & Notewise 스타일 + 버튼) */}
+          <TouchableOpacity
+            style={styles.fab}
+            onPress={openCreateNoteSheet}
+            activeOpacity={0.85}
+          >
+            <Plus size={22} color="#0F172A" strokeWidth={2.5} />
+            <Text style={styles.fabText}>새 메모 작성</Text>
+          </TouchableOpacity>
         </View>
 
-        {/* Bottom Google AdMob Banner Slot (Guaranteed Safe Area) */}
-        <SafeAreaView edges={['bottom']} style={styles.bannerSafeArea}>
-          <AdBannerSlot />
-        </SafeAreaView>
+        {/* 1:1 벤치마크 신규 메모 선택 바텀시트 (DrawNote & Notewise) */}
+        <CreateNoteBottomSheet />
 
-        {/* Modals Layer */}
-        <NoteEditorModal />
+        {/* 1:1 벤치마크 전용 에디터들 */}
+        {activeEditorType === 'text' && (
+          <Modal visible={true} animationType="slide" onRequestClose={closeDedicatedEditor}>
+            <ColorNoteTextEditor
+              note={selectedNoteForDedicatedEditor}
+              onClose={closeDedicatedEditor}
+            />
+          </Modal>
+        )}
+
+        {activeEditorType === 'checklist' && (
+          <Modal visible={true} animationType="slide" onRequestClose={closeDedicatedEditor}>
+            <ColorNoteChecklistEditor
+              note={selectedNoteForDedicatedEditor}
+              onClose={closeDedicatedEditor}
+            />
+          </Modal>
+        )}
+
+        {(activeEditorType === 'canvas' || activeEditorType === 'pdf') && (
+          <Modal visible={true} animationType="slide" onRequestClose={closeDedicatedEditor}>
+            <DocumentWorkspaceModal
+              note={selectedNoteForDedicatedEditor}
+              initialMode={activeEditorType}
+              onClose={closeDedicatedEditor}
+            />
+          </Modal>
+        )}
+
+        {/* 보조 유틸리티 모달들 */}
         <ImageViewerModal />
         <BackupSettingsModal
           visible={isBackupModalOpen}
@@ -136,30 +173,27 @@ const styles = StyleSheet.create({
   },
   fab: {
     position: 'absolute',
-    bottom: 20,
+    bottom: 24,
     right: 20,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 8,
     backgroundColor: '#FDE047', // 포스트잇 대표 옐로우 컬러
-    paddingVertical: 12,
-    paddingHorizontal: 18,
-    borderRadius: 28,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 30,
     shadowColor: '#CA8A04',
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 6,
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    elevation: 8,
     zIndex: 999,
     borderWidth: 1.5,
     borderColor: '#FEF08A',
   },
   fabText: {
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: '700',
     color: '#0F172A',
-  },
-  bannerSafeArea: {
-    backgroundColor: '#FFFFFF',
   },
 });

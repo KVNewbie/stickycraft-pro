@@ -135,11 +135,13 @@ export const VoiceNoteModal: React.FC<VoiceNoteModalProps> = ({
 
   const handleSave = () => {
     const finalDuration = recordedDuration || Math.max(2, timerSecRef.current);
+    const nowStr = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
     const audioItem: AudioNote = {
       id: 'audio_' + Date.now(),
       uri: recordedUri || 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3',
       duration: finalDuration,
       createdAt: Date.now(),
+      title: `녹음 (${nowStr})`,
     };
 
     onSaveAudio(audioItem);

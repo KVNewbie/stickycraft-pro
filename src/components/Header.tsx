@@ -8,6 +8,7 @@ import {
   TextInput,
   Modal,
   Alert,
+  Platform,
 } from 'react-native';
 import {
   LayoutGrid,
@@ -96,6 +97,7 @@ export const Header: React.FC<HeaderProps> = ({ onOpenBackupModal }) => {
                 viewMode === 'grid' && styles.segmentBtnActive,
               ]}
               onPress={() => setViewMode('grid')}
+              {...(Platform.OS === 'web' ? ({ onClick: () => setViewMode('grid') } as any) : {})}
               activeOpacity={0.8}
             >
               <LayoutGrid
@@ -118,6 +120,7 @@ export const Header: React.FC<HeaderProps> = ({ onOpenBackupModal }) => {
                 viewMode === 'canvas' && styles.segmentBtnActive,
               ]}
               onPress={() => setViewMode('canvas')}
+              {...(Platform.OS === 'web' ? ({ onClick: () => setViewMode('canvas') } as any) : {})}
               activeOpacity={0.8}
             >
               <Move
@@ -140,6 +143,7 @@ export const Header: React.FC<HeaderProps> = ({ onOpenBackupModal }) => {
                 viewMode === 'calendar' && styles.segmentBtnActive,
               ]}
               onPress={() => setViewMode('calendar')}
+              {...(Platform.OS === 'web' ? ({ onClick: () => setViewMode('calendar') } as any) : {})}
               activeOpacity={0.8}
             >
               <Calendar

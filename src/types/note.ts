@@ -14,8 +14,8 @@ export type NoteColorId =
 
 export type DecoStyle = 'tape' | 'pin' | 'minimal' | 'corner-fold';
 
-// Noteshelf 스타일 페이퍼 속지 템플릿
-export type PaperTemplate = 'blank' | 'lined' | 'grid' | 'dot' | 'cornell';
+// Noteshelf & DrawNote 스타일 페이퍼 속지 템플릿 (다크 칠판 포함)
+export type PaperTemplate = 'blank' | 'lined' | 'grid' | 'dot' | 'cornell' | 'dark';
 
 // Noteshelf & Jnotes 스타일 음성 녹음 메모
 export interface AudioNote {
@@ -23,8 +23,10 @@ export interface AudioNote {
   uri: string;
   duration: number; // 초
   createdAt: number;
+  title?: string;
   x?: number;
   y?: number;
+  pageIndex?: number;
 }
 
 // Jnotes 스타일 다이어리 플래너 스티커
@@ -44,8 +46,13 @@ export interface FreeHandStroke {
   points: { x: number; y: number }[];
   color: string;
   width: number;
-  tool: 'pen' | 'fountain' | 'highlighter' | 'eraser';
+  tool: 'pen' | 'fountain' | 'highlighter' | 'eraser' | 'connector' | 'shape';
+  shapeType?: 'rect' | 'circle' | 'arrow' | 'line' | 'triangle';
+  shapeStart?: { x: number; y: number };
+  shapeEnd?: { x: number; y: number };
   isRuler?: boolean;
+  isPolygon?: boolean;
+  pageIndex?: number;
 }
 
 // 자유 모드 텍스트 상자
@@ -56,6 +63,8 @@ export interface FreeTextBox {
   text: string;
   fontSize: number;
   color: string;
+  backgroundColor?: string;
+  pageIndex?: number;
 }
 
 // 다중 탭 시스템
@@ -157,13 +166,20 @@ export interface Note {
   lineHeight?: NoteLineHeight;
   cardWidth?: NoteCardWidth;
 
-  // Noteshelf & Jnotes 고도화 기능
-  paperTemplate?: PaperTemplate; // 속지 스타일: blank, lined, grid, dot, cornell
+  // Noteshelf & Jnotes & DrawNote 고도화 기능
+  paperTemplate?: PaperTemplate; // 속지 스타일: blank, lined, grid, dot, cornell, dark
   audioNotes?: AudioNote[]; // 음성 녹음 메모 목록
   stickers?: PlannerSticker[]; // 다이어리 & 플래너 감성 스티커 목록
   freeDrawingData?: string; // 캔버스 자유 필기 스냅샷 Data URL
+  strokes?: FreeHandStroke[]; // 손글씨 벡터 스트로크 포인트 배열 (영구 보존 및 선명한 렌더링)
+  autoSortChecked?: boolean; // ColorNote 스타일 완료 항목 자동 하단 정렬
   editorMode?: EditorMode; // 텍스트 모드 vs 자유 필기 모드
-
+  noteType?: 'text' | 'checklist' | 'canvas' | 'pdf'; // 메모 고유 유형
+  pdfUri?: string; // 첨부된 PDF/문서 URI
+  pdfName?: string; // 문서 파일명
+  textBoxes?: FreeTextBox[]; // PDF 및 캔버스 자유 텍스트 상자
+  bookmarkedPages?: number[]; // Jnotes, Notewise, Goodnotes 스타일 즐겨찾기/책갈피 페이지 번호 목록
+  pageTemplates?: Record<number, PaperTemplate>; // 페이지별 개별 속지 템플릿 (줄노트, 모눈, 코넬 등)
   createdAt: number;
   updatedAt: number;
 }
@@ -188,4 +204,5 @@ export interface FilterOptions {
   sortBy?: SortOption;
   showArchived?: boolean;
   showTrash?: boolean;
+  listLayout?: 'grid' | 'list'; // ColorNote 스타일 그리드 / 리스트 뷰 레이아웃
 }

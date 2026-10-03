@@ -30,3 +30,7 @@ Thumbs.db
 .env
 .env.local
 .env*.local
+
+# Backups and archives
+*.zip
+note/
