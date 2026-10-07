@@ -139,6 +139,8 @@ export interface ReminderInfo {
 
 export type SortOption = 'updated' | 'created' | 'title' | 'color' | 'reminder';
 
+export type LunarDisplayMode = 'none' | 'all' | 'key_days';
+
 export interface Note {
   id: string;
   title: string;

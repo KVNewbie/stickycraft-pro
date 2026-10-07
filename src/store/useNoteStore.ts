@@ -13,12 +13,14 @@ import {
   WidgetSize,
   ReminderInfo,
   SortOption,
+  LunarDisplayMode,
   EditorTab,
   EditorMode,
   FreeHandStroke,
 } from '../types/note';
 import { DEFAULT_BOARDS } from '../constants/colors';
 import { INITIAL_MOCK_NOTES } from '../constants/mockData';
+import { saveAutoBackupSnapshot } from '../utils/autoBackup';
 
 const STORAGE_KEY_NOTES = '@stickycraft_notes_v1';
 const STORAGE_KEY_BOARDS = '@stickycraft_boards_v1';
@@ -26,6 +28,11 @@ const STORAGE_KEY_VIEWMODE = '@stickycraft_viewmode_v1';
 const STORAGE_KEY_WIDGETS = '@stickycraft_widgets_v1';
 const STORAGE_KEY_PIN = '@stickycraft_master_pin_v1';
 const STORAGE_KEY_CANVAS_STROKES = '@stickycraft_canvas_strokes_v1';
+const STORAGE_KEY_SORT = '@stickycraft_sort_v1';
+const STORAGE_KEY_LAYOUT = '@stickycraft_layout_v1';
+const STORAGE_KEY_LUNAR = '@stickycraft_lunar_mode_v1';
+const STORAGE_KEY_CALENDAR_STICKERS = '@stickycraft_calendar_stickers_v1';
+const STORAGE_KEY_AUTOBACKUP_ENABLED = '@stickycraft_autobackup_enabled_v1';
 
 interface NoteState {
   notes: Note[];
@@ -85,6 +92,25 @@ interface NoteState {
   // ColorNote 기능 6: 캘린더 뷰 날짜 선택
   selectedCalendarDate: string;
   setSelectedCalendarDate: (date: string) => void;
+
+  // ColorNote 기능 7: 음력 날짜 표시 설정
+  lunarDisplayMode: LunarDisplayMode;
+  setLunarDisplayMode: (mode: LunarDisplayMode) => void;
+
+  // ColorNote 기능 8: 달력 기념일 / 아이콘 스티커
+  calendarDateStickers: Record<string, { emoji: string; label?: string }>;
+  setCalendarDateSticker: (dateStr: string, sticker?: { emoji: string; label?: string }) => void;
+
+  // ColorNote 기능 9: 자동 백업 옵션
+  autoBackupEnabled: boolean;
+  setAutoBackupEnabled: (enabled: boolean) => void;
+
+  // ColorNote 기능 10: 실시간 알람 상태 & 스누즈/해제
+  activeAlarmNote: Note | null;
+  setActiveAlarmNote: (note: Note | null) => void;
+  checkPendingAlarms: () => void;
+  snoozeAlarm: (noteId: string, minutes?: number) => void;
+  dismissAlarm: (noteId: string) => void;
 
   // Actions
   loadInitialData: () => Promise<void>;
@@ -207,6 +233,80 @@ export const useNoteStore = create<NoteState>((set, get) => ({
   isTrashModalOpen: false,
   trashModalInitialTab: 'trash',
 
+  lunarDisplayMode: 'all',
+  setLunarDisplayMode: (mode) => {
+    set({ lunarDisplayMode: mode });
+    AsyncStorage.setItem(STORAGE_KEY_LUNAR, mode).catch(console.error);
+  },
+  calendarDateStickers: {},
+  setCalendarDateSticker: (dateStr, sticker) => {
+    const state = get();
+    const updated = { ...state.calendarDateStickers };
+    if (sticker) {
+      updated[dateStr] = sticker;
+    } else {
+      delete updated[dateStr];
+    }
+    set({ calendarDateStickers: updated });
+    AsyncStorage.setItem(STORAGE_KEY_CALENDAR_STICKERS, JSON.stringify(updated)).catch(console.error);
+  },
+  autoBackupEnabled: true,
+  setAutoBackupEnabled: (enabled) => {
+    set({ autoBackupEnabled: enabled });
+    AsyncStorage.setItem(STORAGE_KEY_AUTOBACKUP_ENABLED, String(enabled)).catch(console.error);
+  },
+  activeAlarmNote: null,
+  setActiveAlarmNote: (note) => set({ activeAlarmNote: note }),
+  checkPendingAlarms: () => {
+    const state = get();
+    if (state.activeAlarmNote) return;
+    const now = new Date();
+    const ymd = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const currH = now.getHours();
+    const currM = now.getMinutes();
+    for (const n of state.notes) {
+      if (n.isDeleted || !n.reminder || n.reminder.isCompleted) continue;
+      if (n.reminder.date === ymd && n.reminder.time) {
+        const [h, m] = n.reminder.time.split(':').map(Number);
+        if (currH === h && currM === m) {
+          set({ activeAlarmNote: n });
+          break;
+        }
+      }
+    }
+  },
+  snoozeAlarm: (noteId, minutes = 5) => {
+    const state = get();
+    const target = state.notes.find((n) => n.id === noteId);
+    if (!target || !target.reminder) {
+      set({ activeAlarmNote: null });
+      return;
+    }
+    const now = new Date();
+    now.setMinutes(now.getMinutes() + minutes);
+    const newYMD = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const newTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    get().updateNote(noteId, {
+      reminder: {
+        ...target.reminder,
+        date: newYMD,
+        time: newTime,
+        isCompleted: false,
+      },
+    });
+    set({ activeAlarmNote: null });
+  },
+  dismissAlarm: (noteId) => {
+    const state = get();
+    const target = state.notes.find((n) => n.id === noteId);
+    if (target && target.reminder) {
+      get().updateNote(noteId, {
+        reminder: { ...target.reminder, isCompleted: true },
+      });
+    }
+    set({ activeAlarmNote: null });
+  },
+
   // 벤치마크 1:1 전용 에디터 및 작업 공간 상태
   activeEditorType: null,
   isCreateNoteSheetOpen: false,
@@ -261,13 +361,30 @@ export const useNoteStore = create<NoteState>((set, get) => ({
 
   loadInitialData: async () => {
     try {
-      const [savedNotes, savedBoards, savedViewMode, savedWidgets, savedPin, savedCanvasStrokes] = await Promise.all([
+      const [
+        savedNotes,
+        savedBoards,
+        savedViewMode,
+        savedWidgets,
+        savedPin,
+        savedCanvasStrokes,
+        savedSort,
+        savedLayout,
+        savedLunar,
+        savedStickers,
+        savedAutoBackupEnabled,
+      ] = await Promise.all([
         AsyncStorage.getItem(STORAGE_KEY_NOTES),
         AsyncStorage.getItem(STORAGE_KEY_BOARDS),
         AsyncStorage.getItem(STORAGE_KEY_VIEWMODE),
         AsyncStorage.getItem(STORAGE_KEY_WIDGETS),
         AsyncStorage.getItem(STORAGE_KEY_PIN),
         AsyncStorage.getItem(STORAGE_KEY_CANVAS_STROKES),
+        AsyncStorage.getItem(STORAGE_KEY_SORT),
+        AsyncStorage.getItem(STORAGE_KEY_LAYOUT),
+        AsyncStorage.getItem(STORAGE_KEY_LUNAR),
+        AsyncStorage.getItem(STORAGE_KEY_CALENDAR_STICKERS),
+        AsyncStorage.getItem(STORAGE_KEY_AUTOBACKUP_ENABLED),
       ]);
 
       let finalNotes = INITIAL_MOCK_NOTES;
@@ -355,6 +472,18 @@ export const useNoteStore = create<NoteState>((set, get) => ({
         }
       }
 
+      let parsedStickers = {};
+      if (savedStickers) {
+        try {
+          parsedStickers = JSON.parse(savedStickers);
+        } catch (e) {}
+      }
+
+      const finalSort = (savedSort as SortOption) || 'updated';
+      const finalLayout = (savedLayout === 'list' ? 'list' : 'grid') as 'grid' | 'list';
+      const finalLunar = (savedLunar as LunarDisplayMode) || 'all';
+      const finalAutoBackup = savedAutoBackupEnabled !== 'false';
+
       set({
         notes: finalNotes,
         boards: finalBoards,
@@ -362,8 +491,27 @@ export const useNoteStore = create<NoteState>((set, get) => ({
         widgets: finalWidgets,
         masterPin: savedPin || null,
         canvasBoardStrokes: finalCanvasStrokes,
+        filters: {
+          ...initialFilters,
+          sortBy: finalSort,
+          listLayout: finalLayout,
+        },
+        lunarDisplayMode: finalLunar,
+        calendarDateStickers: parsedStickers,
+        autoBackupEnabled: finalAutoBackup,
         isLoading: false,
       });
+
+      // 자동 백업 실행 (데이터 보존용 스냅샷)
+      if (finalAutoBackup) {
+        saveAutoBackupSnapshot({
+          notes: finalNotes,
+          boards: finalBoards,
+          widgets: finalWidgets,
+          masterPin: savedPin || null,
+          calendarStickers: parsedStickers,
+        });
+      }
     } catch (error) {
       console.error('Error loading initial data:', error);
       set({ notes: INITIAL_MOCK_NOTES, isLoading: false });
@@ -491,11 +639,13 @@ export const useNoteStore = create<NoteState>((set, get) => ({
   // ColorNote 기능 5: 정렬
   setSortBy: (sort) => {
     set((s) => ({ filters: { ...s.filters, sortBy: sort } }));
+    AsyncStorage.setItem(STORAGE_KEY_SORT, sort).catch(console.error);
   },
 
   // ColorNote 기능: 그리드 / 리스트 레이아웃 토글
   setListLayout: (layout) => {
     set((s) => ({ filters: { ...s.filters, listLayout: layout } }));
+    AsyncStorage.setItem(STORAGE_KEY_LAYOUT, layout).catch(console.error);
   },
 
   // ColorNote 기능: 체크리스트 전체 완료/해제/자동정렬
@@ -783,6 +933,8 @@ export const useNoteStore = create<NoteState>((set, get) => ({
       boards: state.boards,
       widgets: state.widgets,
       masterPin: state.masterPin,
+      calendarStickers: state.calendarDateStickers,
+      lunarDisplayMode: state.lunarDisplayMode,
       exportedAt: Date.now(),
     }, null, 2);
   },
@@ -796,6 +948,8 @@ export const useNoteStore = create<NoteState>((set, get) => ({
           boards: Array.isArray(data.boards) ? data.boards : DEFAULT_BOARDS,
           widgets: Array.isArray(data.widgets) ? data.widgets : [],
           masterPin: typeof data.masterPin === 'string' ? data.masterPin : null,
+          calendarDateStickers: data.calendarStickers && typeof data.calendarStickers === 'object' ? data.calendarStickers : {},
+          ...(data.lunarDisplayMode ? { lunarDisplayMode: data.lunarDisplayMode } : {}),
         });
         AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(data.notes)).catch(console.error);
         if (Array.isArray(data.boards)) {
@@ -806,6 +960,9 @@ export const useNoteStore = create<NoteState>((set, get) => ({
         }
         if (typeof data.masterPin === 'string') {
           AsyncStorage.setItem(STORAGE_KEY_PIN, data.masterPin).catch(console.error);
+        }
+        if (data.calendarStickers && typeof data.calendarStickers === 'object') {
+          AsyncStorage.setItem(STORAGE_KEY_CALENDAR_STICKERS, JSON.stringify(data.calendarStickers)).catch(console.error);
         }
         return true;
       }

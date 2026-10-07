@@ -28,6 +28,8 @@ import { WidgetStudioModal } from './src/components/WidgetStudioModal';
 import { PinLockModal } from './src/components/PinLockModal';
 import { TrashArchiveModal } from './src/components/TrashArchiveModal';
 import { ReminderModal } from './src/components/ReminderModal';
+import { StatusBarPinBanner } from './src/components/StatusBarPinBanner';
+import { AlarmAlertModal } from './src/components/AlarmAlertModal';
 
 export default function App() {
   const {
@@ -45,12 +47,22 @@ export default function App() {
     isTrashModalOpen,
     trashModalInitialTab,
     closeTrashModal,
+    activeAlarmNote,
+    snoozeAlarm,
+    dismissAlarm,
+    openEditNoteEditor,
+    checkPendingAlarms,
   } = useNoteStore();
 
   const [isBackupModalOpen, setIsBackupModalOpen] = useState(false);
 
   useEffect(() => {
     loadInitialData();
+    // 15초마다 주기적으로 알람 및 도래한 리마인더 점검
+    const timer = setInterval(() => {
+      checkPendingAlarms();
+    }, 15000);
+    return () => clearInterval(timer);
   }, []);
 
   if (isLoading) {
@@ -69,6 +81,9 @@ export default function App() {
 
         {/* Top Header */}
         <Header onOpenBackupModal={() => setIsBackupModalOpen(true)} />
+
+        {/* ColorNote 상태표시줄 고정 알림 배너 */}
+        <StatusBarPinBanner />
 
         {/* Search & Filter Bar (Toggled) */}
         {isSearchOpen && <SearchBar />}
@@ -143,6 +158,19 @@ export default function App() {
           visible={isReminderModalOpen}
           note={reminderTargetNote}
           onClose={closeReminderModal}
+        />
+        <AlarmAlertModal
+          note={activeAlarmNote}
+          onDismiss={() => {
+            if (activeAlarmNote) dismissAlarm(activeAlarmNote.id);
+          }}
+          onSnooze={(mins) => {
+            if (activeAlarmNote) snoozeAlarm(activeAlarmNote.id, mins);
+          }}
+          onOpenNote={(note) => {
+            dismissAlarm(note.id);
+            openEditNoteEditor(note);
+          }}
         />
       </SafeAreaView>
     </SafeAreaProvider>

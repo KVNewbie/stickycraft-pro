@@ -28,12 +28,14 @@ import {
   Type,
   X,
   Eye,
+  Bell,
 } from 'lucide-react-native';
 import { Note, NoteColorId, AudioNote, NoteFontSize } from '../types/note';
 import { NOTE_COLORS, COLOR_KEYS } from '../constants/colors';
 import { useNoteStore } from '../store/useNoteStore';
 import { PaperTemplatePattern } from './PaperTemplatePattern';
 import { AudioRecordingStudio } from './AudioRecordingStudio';
+import { ColorNoteColorMapModal } from './ColorNoteColorMapModal';
 
 interface ColorNoteTextEditorProps {
   note?: Note | null;
@@ -56,6 +58,7 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
     updateNote,
     deleteNote,
     toggleNoteLock,
+    openReminderModal,
   } = useNoteStore();
 
   const [noteId] = useState<string>(initialNote?.id || '');
@@ -329,18 +332,24 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
               <Copy size={18} color={activeColorConfig.text} />
             </TouchableOpacity>
 
-            {/* Color Palette Picker */}
+            {/* Color Palette Picker (ColorNote Color Map Trigger) */}
             <TouchableOpacity
-              style={styles.iconBtn}
-              onPress={() => setIsColorPickerOpen(!isColorPickerOpen)}
-              {...(Platform.OS === 'web' ? ({ onClick: () => setIsColorPickerOpen(!isColorPickerOpen) } as any) : {})}
+              style={[
+                styles.colorTileHeaderBtn,
+                { borderColor: activeColorConfig.cardBorder, backgroundColor: activeColorConfig.bg },
+              ]}
+              onPress={() => setIsColorPickerOpen(true)}
+              {...(Platform.OS === 'web' ? ({ onClick: () => setIsColorPickerOpen(true) } as any) : {})}
+              activeOpacity={0.7}
             >
               <View
                 style={[
-                  styles.colorDotPreview,
+                  styles.colorTileInner,
                   { backgroundColor: activeColorConfig.cardBorder },
                 ]}
-              />
+              >
+                <Palette size={12} color="#FFFFFF" />
+              </View>
             </TouchableOpacity>
 
             {/* Audio Recording Toggle */}
@@ -362,6 +371,38 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
                 size={18}
                 color={isPinned ? '#E11D48' : activeColorConfig.text}
                 fill={isPinned ? '#E11D48' : 'none'}
+              />
+            </TouchableOpacity>
+
+            {/* ColorNote 알람 & 상태바 리마인더 */}
+            <TouchableOpacity
+              style={[
+                styles.iconBtn,
+                initialNote?.reminder && { backgroundColor: '#FEE2E2', borderColor: '#FCA5A5' },
+              ]}
+              onPress={() => {
+                if (initialNote) {
+                  openReminderModal(initialNote);
+                } else {
+                  showToast('메모를 먼저 저장하신 후 알람을 설정하실 수 있습니다');
+                }
+              }}
+              {...(Platform.OS === 'web'
+                ? ({
+                    onClick: () => {
+                      if (initialNote) {
+                        openReminderModal(initialNote);
+                      } else {
+                        showToast('메모를 먼저 저장하신 후 알람을 설정하실 수 있습니다');
+                      }
+                    },
+                  } as any)
+                : {})}
+            >
+              <Bell
+                size={18}
+                color={initialNote?.reminder ? '#DC2626' : activeColorConfig.text}
+                fill={initialNote?.reminder?.pinToStatusBar ? '#DC2626' : 'none'}
               />
             </TouchableOpacity>
 
@@ -467,39 +508,19 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
           </View>
         )}
 
-        {/* Color Palette Flyout Strip */}
-        {isColorPickerOpen && (
-          <View style={styles.colorPaletteStrip}>
-            {COLOR_KEYS.map((k) => {
-              const cfg = NOTE_COLORS[k];
-              const isSelected = color === k;
-              return (
-                <TouchableOpacity
-                  key={k}
-                  style={[
-                    styles.colorChipBtn,
-                    { backgroundColor: cfg.cardBorder },
-                    isSelected && styles.colorChipBtnSelected,
-                  ]}
-                  onPress={() => {
-                    setColor(k);
-                    setIsColorPickerOpen(false);
-                  }}
-                  {...(Platform.OS === 'web'
-                    ? ({
-                        onClick: () => {
-                          setColor(k);
-                          setIsColorPickerOpen(false);
-                        },
-                      } as any)
-                    : {})}
-                >
-                  {isSelected && <Check size={12} color="#FFFFFF" />}
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        )}
+        {/* ColorNote Signature Color Map Picker Modal */}
+        <ColorNoteColorMapModal
+          visible={isColorPickerOpen}
+          currentColor={color}
+          onSelectColor={(k) => {
+            setColor(k);
+            if (noteId) {
+              updateNote(noteId, { color: k });
+            }
+            showToast(`🎨 메모 색상 변경: ${NOTE_COLORS[k]?.name || k}`);
+          }}
+          onClose={() => setIsColorPickerOpen(false)}
+        />
 
         {/* Audio Recording Studio (Live Recording Pill & Track Player) */}
         {(isRecording || audioNotes.length > 0) && (
@@ -779,6 +800,27 @@ const styles = StyleSheet.create({
   },
   iconBtnActiveRed: {
     backgroundColor: '#FEE2E2',
+  },
+  colorTileHeaderBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.12,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  colorTileInner: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 5,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   colorDotPreview: {
     width: 20,

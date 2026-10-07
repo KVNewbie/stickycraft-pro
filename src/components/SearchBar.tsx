@@ -16,10 +16,15 @@ import {
   RotateCcw,
   Tag,
   ArrowUpDown,
+  FileText,
+  ListCheck,
+  Mic,
+  Sparkles,
+  ChevronRight,
 } from 'lucide-react-native';
 import { useNoteStore } from '../store/useNoteStore';
 import { NOTE_COLORS, COLOR_KEYS } from '../constants/colors';
-import { NoteColorId, SortOption } from '../types/note';
+import { NoteColorId, SortOption, Note } from '../types/note';
 
 const SORT_OPTIONS: { id: SortOption; label: string }[] = [
   { id: 'updated', label: '최근 수정순' },
@@ -41,6 +46,8 @@ export const SearchBar: React.FC = () => {
     toggleFilterChecklist,
     setSortBy,
     resetFilters,
+    openEditNoteEditor,
+    openLockModal,
   } = useNoteStore();
 
   // 모든 메모에서 사용된 태그 고유 목록 추출
@@ -49,6 +56,45 @@ export const SearchBar: React.FC = () => {
     notes.forEach((n) => n.tags.forEach((t) => set.add(t)));
     return Array.from(set);
   }, [notes]);
+
+  // 통합 검색 인덱스 매칭 목록
+  const indexedMatches = useMemo(() => {
+    const q = filters.searchQuery.trim().toLowerCase();
+    if (!q) return [];
+
+    return notes
+      .filter((n) => !n.isDeleted)
+      .map((note) => {
+        let field: 'title' | 'content' | 'checklist' | 'tag' | 'audio' | null = null;
+        let snippet = '';
+
+        if (note.title && note.title.toLowerCase().includes(q)) {
+          field = 'title';
+          snippet = note.title;
+        } else if (note.content && note.content.toLowerCase().includes(q)) {
+          field = 'content';
+          const idx = note.content.toLowerCase().indexOf(q);
+          const start = Math.max(0, idx - 15);
+          const end = Math.min(note.content.length, idx + q.length + 30);
+          snippet = (start > 0 ? '...' : '') + note.content.substring(start, end) + (end < note.content.length ? '...' : '');
+        } else if (note.checklist && note.checklist.some((c) => c.text.toLowerCase().includes(q))) {
+          field = 'checklist';
+          const matchItem = note.checklist.find((c) => c.text.toLowerCase().includes(q));
+          snippet = `할 일: ${matchItem?.text || ''}`;
+        } else if (note.tags && note.tags.some((t) => t.toLowerCase().includes(q))) {
+          field = 'tag';
+          snippet = `태그: #${note.tags.join(' #')}`;
+        } else if (note.audioNotes && note.audioNotes.some((a) => (a.title || '').toLowerCase().includes(q))) {
+          field = 'audio';
+          const matchA = note.audioNotes.find((a) => (a.title || '').toLowerCase().includes(q));
+          snippet = `음성 녹음: ${matchA?.title || ''}`;
+        }
+
+        if (!field) return null;
+        return { note, field, snippet };
+      })
+      .filter(Boolean) as { note: Note; field: string; snippet: string }[];
+  }, [notes, filters.searchQuery]);
 
   const hasActiveFilters =
     filters.searchQuery.trim() !== '' ||
@@ -59,6 +105,14 @@ export const SearchBar: React.FC = () => {
     filters.onlyChecklist ||
     filters.sortBy !== 'updated';
 
+  const handleOpenNote = (note: Note) => {
+    if (note.isLocked) {
+      openLockModal(note, () => openEditNoteEditor(note));
+    } else {
+      openEditNoteEditor(note);
+    }
+  };
+
   return (
     <View style={styles.container}>
       {/* Search Input Box */}
@@ -66,7 +120,7 @@ export const SearchBar: React.FC = () => {
         <Search size={16} color="#94A3B8" />
         <TextInput
           style={styles.input}
-          placeholder="메모 제목, 내용, 태그 검색..."
+          placeholder="메모 제목, 내용, 태그, 체크리스트 통합 검색..."
           placeholderTextColor="#94A3B8"
           value={filters.searchQuery}
           onChangeText={setSearchQuery}
@@ -77,6 +131,58 @@ export const SearchBar: React.FC = () => {
           </TouchableOpacity>
         )}
       </View>
+
+      {/* 실시간 통합 검색 인덱스 팝업/서머리 */}
+      {filters.searchQuery.trim().length > 0 && (
+        <View style={styles.indexBox}>
+          <View style={styles.indexHeader}>
+            <View style={styles.indexTitleRow}>
+              <Sparkles size={13} color="#2563EB" />
+              <Text style={styles.indexTitle}>
+                통합 검색 인덱스: "{filters.searchQuery}" ({indexedMatches.length}건 일치)
+              </Text>
+            </View>
+          </View>
+
+          {indexedMatches.length > 0 ? (
+            <ScrollView
+              style={styles.indexListScroll}
+              nestedScrollEnabled
+              showsVerticalScrollIndicator={false}
+            >
+              {indexedMatches.slice(0, 4).map(({ note, field, snippet }) => {
+                const colorCfg = NOTE_COLORS[note.color] || NOTE_COLORS.yellow;
+                return (
+                  <TouchableOpacity
+                    key={note.id}
+                    style={styles.indexResultItem}
+                    onPress={() => handleOpenNote(note)}
+                    activeOpacity={0.7}
+                  >
+                    <View
+                      style={[
+                        styles.indexItemColorDot,
+                        { backgroundColor: colorCfg.cardBorder },
+                      ]}
+                    />
+                    <View style={styles.indexItemTextWrap}>
+                      <Text style={styles.indexItemTitle} numberOfLines={1}>
+                        {note.title || '제목 없음'}
+                      </Text>
+                      <Text style={styles.indexItemSnippet} numberOfLines={1}>
+                        {snippet}
+                      </Text>
+                    </View>
+                    <ChevronRight size={14} color="#94A3B8" />
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          ) : (
+            <Text style={styles.indexEmptyText}>일치하는 메모 내용이 없습니다.</Text>
+          )}
+        </View>
+      )}
 
       {/* Sort Options Bar (ColorNote Feature) */}
       <View style={styles.sortBar}>
@@ -368,5 +474,67 @@ const styles = StyleSheet.create({
   },
   tagChipTextActive: {
     color: '#FFFFFF',
+  },
+  indexBox: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    marginTop: 8,
+    padding: 10,
+  },
+  indexHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  indexTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  indexTitle: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#1D4ED8',
+  },
+  indexListScroll: {
+    maxHeight: 180,
+  },
+  indexResultItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 8,
+    padding: 8,
+    marginVertical: 3,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    gap: 8,
+  },
+  indexItemColorDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  indexItemTextWrap: {
+    flex: 1,
+  },
+  indexItemTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  indexItemSnippet: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 1,
+  },
+  indexEmptyText: {
+    fontSize: 12,
+    color: '#94A3B8',
+    paddingVertical: 6,
+    textAlign: 'center',
   },
 });

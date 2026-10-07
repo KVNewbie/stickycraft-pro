@@ -31,11 +31,13 @@ import {
   ListCheck,
   Copy,
   Search,
+  Bell,
 } from 'lucide-react-native';
 import { Note, NoteColorId, ChecklistItem, AudioNote } from '../types/note';
 import { NOTE_COLORS, COLOR_KEYS } from '../constants/colors';
 import { useNoteStore } from '../store/useNoteStore';
 import { AudioRecordingStudio } from './AudioRecordingStudio';
+import { ColorNoteColorMapModal } from './ColorNoteColorMapModal';
 
 interface ColorNoteChecklistEditorProps {
   note?: Note | null;
@@ -51,6 +53,7 @@ export const ColorNoteChecklistEditor: React.FC<ColorNoteChecklistEditorProps> =
     updateNote,
     deleteNote,
     openLockModal,
+    openReminderModal,
   } = useNoteStore();
 
   const [noteId, setNoteId] = useState<string>(initialNote?.id || '');
@@ -342,12 +345,44 @@ export const ColorNoteChecklistEditor: React.FC<ColorNoteChecklistEditorProps> =
               />
             </TouchableOpacity>
 
-            {/* 색상 선택기 토글 */}
+            {/* ColorNote 컬러 맵 트리거 */}
             <TouchableOpacity
-              style={styles.headerIconButton}
-              onPress={() => setIsColorPickerOpen(!isColorPickerOpen)}
+              style={[
+                styles.colorTileHeaderBtn,
+                { borderColor: activeColorConfig.cardBorder, backgroundColor: activeColorConfig.bg },
+              ]}
+              onPress={() => setIsColorPickerOpen(true)}
+              activeOpacity={0.7}
             >
-              <Palette size={20} color="#475569" />
+              <View
+                style={[
+                  styles.colorTileInner,
+                  { backgroundColor: activeColorConfig.cardBorder },
+                ]}
+              >
+                <Palette size={12} color="#FFFFFF" />
+              </View>
+            </TouchableOpacity>
+
+            {/* ColorNote 알람 & 리마인더 버튼 */}
+            <TouchableOpacity
+              style={[
+                styles.headerIconButton,
+                initialNote?.reminder && { backgroundColor: '#FEE2E2', borderRadius: 8 },
+              ]}
+              onPress={() => {
+                if (initialNote) {
+                  openReminderModal(initialNote);
+                } else {
+                  showToast('체크리스트를 먼저 저장하신 후 알람을 설정하실 수 있습니다');
+                }
+              }}
+            >
+              <Bell
+                size={20}
+                color={initialNote?.reminder ? '#DC2626' : '#475569'}
+                fill={initialNote?.reminder?.pinToStatusBar ? '#DC2626' : 'none'}
+              />
             </TouchableOpacity>
 
             {/* 더보기 메뉴 버튼 */}
@@ -428,33 +463,19 @@ export const ColorNoteChecklistEditor: React.FC<ColorNoteChecklistEditorProps> =
           </View>
         )}
 
-        {/* 12색 컬러 팔레트 슬라이더 */}
-        {isColorPickerOpen && (
-          <View style={styles.colorPickerContainer}>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.colorList}>
-              {COLOR_KEYS.map((k) => {
-                const conf = NOTE_COLORS[k];
-                const isSelected = color === k;
-                return (
-                  <TouchableOpacity
-                    key={k}
-                    style={[
-                      styles.colorDot,
-                      { backgroundColor: conf.bg, borderColor: conf.cardBorder },
-                      isSelected && styles.colorDotSelected,
-                    ]}
-                    onPress={() => {
-                      setColor(k);
-                      setIsColorPickerOpen(false);
-                    }}
-                  >
-                    {isSelected && <Check size={14} color="#1E293B" strokeWidth={3} />}
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-          </View>
-        )}
+        {/* ColorNote Signature Color Map Picker Modal */}
+        <ColorNoteColorMapModal
+          visible={isColorPickerOpen}
+          currentColor={color}
+          onSelectColor={(k) => {
+            setColor(k);
+            if (noteId) {
+              updateNote(noteId, { color: k });
+            }
+            showToast(`🎨 메모 색상 변경: ${NOTE_COLORS[k]?.name || k}`);
+          }}
+          onClose={() => setIsColorPickerOpen(false)}
+        />
 
         {/* 음성 녹음 스튜디오 */}
         {(isRecording || audioNotes.length > 0) && (
@@ -671,6 +692,27 @@ const styles = StyleSheet.create({
   headerIconButton: {
     padding: 6,
     borderRadius: 8,
+  },
+  colorTileHeaderBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.12,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  colorTileInner: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 5,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   activeIcon: {
     backgroundColor: '#FEE2E2',

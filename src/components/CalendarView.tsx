@@ -9,15 +9,20 @@ import {
   Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { Sparkles, Moon } from 'lucide-react-native';
 import { useNoteStore } from '../store/useNoteStore';
 import { NOTE_COLORS } from '../constants/colors';
 import { Note } from '../types/note';
+import { getLunarDate } from '../utils/lunarCalendar';
+import { CalendarStickerPickerModal } from './CalendarStickerPickerModal';
 
 const WEEKDAYS = ['일', '월', '화', '수', '목', '금', '토'];
 
 interface DayCell {
   dateStr: string; // YYYY-MM-DD
   dayNumber: number;
+  year: number;
+  month: number;
   isCurrentMonth: boolean;
   isToday: boolean;
   notes: Note[];
@@ -31,7 +36,13 @@ export const CalendarView: React.FC = () => {
     openEditNoteEditor,
     openNewNoteEditor,
     toggleChecklistItem,
+    lunarDisplayMode,
+    setLunarDisplayMode,
+    calendarDateStickers,
+    setCalendarDateSticker,
   } = useNoteStore();
+
+  const [isStickerPickerOpen, setIsStickerPickerOpen] = useState(false);
 
   // Active month/year state
   const [currentDate, setCurrentDate] = useState(() => {
@@ -91,13 +102,14 @@ export const CalendarView: React.FC = () => {
     for (let i = firstDayOfMonth - 1; i >= 0; i--) {
       const dNum = daysInPrevMonth - i;
       const prevDate = new Date(year, month - 1, dNum);
-      const dateStr = `${prevDate.getFullYear()}-${String(prevDate.getMonth() + 1).padStart(
-        2,
-        '0'
-      )}-${String(dNum).padStart(2, '0')}`;
+      const prevY = prevDate.getFullYear();
+      const prevM = prevDate.getMonth() + 1;
+      const dateStr = `${prevY}-${String(prevM).padStart(2, '0')}-${String(dNum).padStart(2, '0')}`;
       cells.push({
         dateStr,
         dayNumber: dNum,
+        year: prevY,
+        month: prevM,
         isCurrentMonth: false,
         isToday: dateStr === todayStr,
         notes: notesByDate[dateStr] || [],
@@ -110,6 +122,8 @@ export const CalendarView: React.FC = () => {
       cells.push({
         dateStr,
         dayNumber: d,
+        year,
+        month: month + 1,
         isCurrentMonth: true,
         isToday: dateStr === todayStr,
         notes: notesByDate[dateStr] || [],
@@ -120,13 +134,14 @@ export const CalendarView: React.FC = () => {
     const remaining = 42 - cells.length;
     for (let d = 1; d <= remaining; d++) {
       const nextDate = new Date(year, month + 1, d);
-      const dateStr = `${nextDate.getFullYear()}-${String(nextDate.getMonth() + 1).padStart(
-        2,
-        '0'
-      )}-${String(d).padStart(2, '0')}`;
+      const nextY = nextDate.getFullYear();
+      const nextM = nextDate.getMonth() + 1;
+      const dateStr = `${nextY}-${String(nextM).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
       cells.push({
         dateStr,
         dayNumber: d,
+        year: nextY,
+        month: nextM,
         isCurrentMonth: false,
         isToday: dateStr === todayStr,
         notes: notesByDate[dateStr] || [],
@@ -140,6 +155,15 @@ export const CalendarView: React.FC = () => {
   const selectedDateNotes = useMemo(() => {
     return notesByDate[selectedCalendarDate] || [];
   }, [notesByDate, selectedCalendarDate]);
+
+  // Selected date lunar info
+  const selectedDateLunar = useMemo(() => {
+    if (!selectedCalendarDate) return getLunarDate(year, month + 1, 1);
+    const [y, m, d] = selectedCalendarDate.split('-').map(Number);
+    return getLunarDate(y, m, d);
+  }, [selectedCalendarDate, year, month]);
+
+  const selectedSticker = calendarDateStickers[selectedCalendarDate];
 
   const handlePrevMonth = () => {
     setCurrentDate(new Date(year, month - 1, 1));
@@ -177,6 +201,34 @@ export const CalendarView: React.FC = () => {
             </View>
 
             <View style={styles.navButtons}>
+              {/* Lunar Display Mode Toggle (음력 설정) */}
+              <TouchableOpacity
+                style={[
+                  styles.lunarToggleBtn,
+                  lunarDisplayMode !== 'none' && styles.lunarToggleBtnActive,
+                ]}
+                onPress={() => {
+                  const nextMode =
+                    lunarDisplayMode === 'all'
+                      ? 'key_days'
+                      : lunarDisplayMode === 'key_days'
+                      ? 'none'
+                      : 'all';
+                  setLunarDisplayMode(nextMode);
+                }}
+                activeOpacity={0.7}
+              >
+                <Moon size={12} color={lunarDisplayMode !== 'none' ? '#2563EB' : '#64748B'} />
+                <Text
+                  style={[
+                    styles.lunarToggleText,
+                    lunarDisplayMode !== 'none' && styles.lunarToggleTextActive,
+                  ]}
+                >
+                  {lunarDisplayMode === 'all' ? '음력' : lunarDisplayMode === 'key_days' ? '초하루/보름' : '음력끔'}
+                </Text>
+              </TouchableOpacity>
+
               <TouchableOpacity onPress={handleGoToday} style={styles.todayBtn}>
                 <Text style={styles.todayBtnText}>오늘</Text>
               </TouchableOpacity>
@@ -210,6 +262,12 @@ export const CalendarView: React.FC = () => {
           <View style={styles.grid}>
             {calendarCells.map((cell) => {
               const isSelected = cell.dateStr === selectedCalendarDate;
+              const lunar = getLunarDate(cell.year, cell.month, cell.dayNumber);
+              const sticker = calendarDateStickers[cell.dateStr];
+              const showLunar =
+                lunarDisplayMode === 'all' ||
+                (lunarDisplayMode === 'key_days' && lunar.isKeyDay);
+
               return (
                 <TouchableOpacity
                   key={cell.dateStr}
@@ -222,16 +280,38 @@ export const CalendarView: React.FC = () => {
                   onPress={() => setSelectedCalendarDate(cell.dateStr)}
                   activeOpacity={0.7}
                 >
-                  <Text
-                    style={[
-                      styles.dayNumber,
-                      !cell.isCurrentMonth && styles.dayNumberOutside,
-                      cell.isToday && styles.dayNumberToday,
-                      isSelected && styles.dayNumberSelected,
-                    ]}
-                  >
-                    {cell.dayNumber}
-                  </Text>
+                  {/* Day Number & Sticker Header Row */}
+                  <View style={styles.cellTopRow}>
+                    <Text
+                      style={[
+                        styles.dayNumber,
+                        !cell.isCurrentMonth && styles.dayNumberOutside,
+                        cell.isToday && styles.dayNumberToday,
+                        isSelected && styles.dayNumberSelected,
+                      ]}
+                    >
+                      {cell.dayNumber}
+                    </Text>
+
+                    {sticker && (
+                      <Text style={styles.cellStickerEmoji}>{sticker.emoji}</Text>
+                    )}
+                  </View>
+
+                  {/* Lunar Date Display */}
+                  {showLunar && (
+                    <Text
+                      style={[
+                        styles.cellLunarText,
+                        lunar.holidayName ? styles.cellLunarHoliday : null,
+                        !cell.isCurrentMonth && styles.cellLunarOutside,
+                        isSelected && styles.cellLunarSelected,
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {lunar.shortText}
+                    </Text>
+                  )}
 
                   {/* ColorNote Bars / Dots */}
                   <View style={styles.noteIndicators}>
@@ -276,6 +356,38 @@ export const CalendarView: React.FC = () => {
             >
               <Ionicons name="add" size={18} color="#FFF" />
               <Text style={styles.addNoteForDateText}>이 날짜에 새 메모</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Selected Date Lunar Info & Anniversary Sticker Bar */}
+          <View style={styles.dateMetaBar}>
+            <View style={styles.dateMetaLeft}>
+              <View style={styles.selectedLunarBadge}>
+                <Moon size={13} color="#2563EB" />
+                <Text style={styles.selectedLunarBadgeText}>
+                  {selectedDateLunar.displayText}
+                </Text>
+              </View>
+
+              {selectedSticker && (
+                <View style={styles.selectedStickerPill}>
+                  <Text style={styles.selectedStickerEmoji}>{selectedSticker.emoji}</Text>
+                  <Text style={styles.selectedStickerLabel}>
+                    {selectedSticker.label || '기념일'}
+                  </Text>
+                </View>
+              )}
+            </View>
+
+            <TouchableOpacity
+              style={styles.stickerTriggerBtn}
+              onPress={() => setIsStickerPickerOpen(true)}
+              activeOpacity={0.8}
+            >
+              <Sparkles size={14} color="#D97706" />
+              <Text style={styles.stickerTriggerBtnText}>
+                {selectedSticker ? '기념일/아이콘 수정' : '기념일/아이콘 추가'}
+              </Text>
             </TouchableOpacity>
           </View>
 
@@ -370,6 +482,15 @@ export const CalendarView: React.FC = () => {
           )}
         </View>
       </ScrollView>
+
+      {/* Calendar Date Sticker / Anniversary Picker Modal */}
+      <CalendarStickerPickerModal
+        visible={isStickerPickerOpen}
+        dateStr={selectedCalendarDate}
+        currentSticker={selectedSticker}
+        onSave={(st) => setCalendarDateSticker(selectedCalendarDate, st)}
+        onClose={() => setIsStickerPickerOpen(false)}
+      />
     </View>
   );
 };
@@ -417,6 +538,30 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+  },
+  lunarToggleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 8,
+  },
+  lunarToggleBtnActive: {
+    backgroundColor: '#EFF6FF',
+    borderColor: '#93C5FD',
+  },
+  lunarToggleText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+  lunarToggleTextActive: {
+    color: '#2563EB',
+    fontWeight: '700',
   },
   todayBtn: {
     backgroundColor: '#EFF6FF',
@@ -502,6 +647,106 @@ const styles = StyleSheet.create({
   dayNumberSelected: {
     color: '#1D4ED8',
     fontWeight: '800',
+  },
+  cellTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+    width: '100%',
+  },
+  cellStickerEmoji: {
+    fontSize: 10,
+    marginLeft: 2,
+  },
+  cellLunarText: {
+    fontSize: 9,
+    color: '#64748B',
+    fontWeight: '500',
+    marginTop: -2,
+    marginBottom: 2,
+  },
+  cellLunarHoliday: {
+    color: '#DC2626',
+    fontWeight: '700',
+  },
+  cellLunarOutside: {
+    color: '#CBD5E1',
+  },
+  cellLunarSelected: {
+    color: '#1D4ED8',
+    fontWeight: '700',
+  },
+  dateMetaBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  dateMetaLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'wrap',
+    flex: 1,
+  },
+  selectedLunarBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#EFF6FF',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+  },
+  selectedLunarBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#1D4ED8',
+  },
+  selectedStickerPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#FEF3C7',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+  },
+  selectedStickerEmoji: {
+    fontSize: 13,
+  },
+  selectedStickerLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#B45309',
+  },
+  stickerTriggerBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+    marginLeft: 8,
+  },
+  stickerTriggerBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#475569',
   },
   noteIndicators: {
     width: '100%',

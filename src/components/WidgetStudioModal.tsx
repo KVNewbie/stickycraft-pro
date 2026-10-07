@@ -29,6 +29,7 @@ export const WidgetStudioModal: React.FC = () => {
     widgets,
     addWidget,
     removeWidget,
+    updateWidget,
     toggleChecklistItem,
   } = useNoteStore();
 
@@ -153,15 +154,24 @@ export const WidgetStudioModal: React.FC = () => {
                 </View>
 
                 {/* 2. Visual Options */}
-                <Text style={styles.sectionHeading}>2. 스타일 및 투명도</Text>
-                <View style={styles.optionRow}>
-                  <Text style={styles.optionLabel}>배경 투명도</Text>
-                  <View style={styles.opacityBtnGroup}>
+                <Text style={styles.sectionHeading}>2. 스타일 및 배경 투명도 (0% ~ 100%)</Text>
+                <View style={styles.optionColumn}>
+                  <View style={styles.optionHeaderRow}>
+                    <Text style={styles.optionLabel}>배경 투명도 설정</Text>
+                    <Text style={styles.opacityValueHighlight}>
+                      {Math.round(selectedOpacity * 100)}%
+                    </Text>
+                  </View>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.opacityBtnGroup}>
                     {[
-                      { val: 1.0, label: '100%' },
-                      { val: 0.85, label: '85%' },
-                      { val: 0.65, label: '65%' },
-                      { val: 0.45, label: '45%' },
+                      { val: 1.0, label: '100% (불투명)' },
+                      { val: 0.9, label: '90%' },
+                      { val: 0.8, label: '80%' },
+                      { val: 0.7, label: '70%' },
+                      { val: 0.5, label: '50% (반투명)' },
+                      { val: 0.3, label: '30%' },
+                      { val: 0.15, label: '15%' },
+                      { val: 0.0, label: '0% (완전투명)' },
                     ].map((op) => (
                       <TouchableOpacity
                         key={op.label}
@@ -181,7 +191,7 @@ export const WidgetStudioModal: React.FC = () => {
                         </Text>
                       </TouchableOpacity>
                     ))}
-                  </View>
+                  </ScrollView>
                 </View>
 
                 <View style={styles.optionRow}>
@@ -400,6 +410,39 @@ export const WidgetStudioModal: React.FC = () => {
                           </TouchableOpacity>
                         </View>
 
+                        {/* Widget Opacity adjustment */}
+                        <View style={styles.manageOpacityRow}>
+                          <View style={styles.manageOpacityHeader}>
+                            <Ionicons name="color-filter-outline" size={14} color="#64748B" />
+                            <Text style={styles.manageOpacityLabel}>투명도 설정:</Text>
+                            <Text style={styles.manageOpacityValue}>
+                              {Math.round((w.opacity ?? 0.95) * 100)}%
+                            </Text>
+                          </View>
+                          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.manageOpacityChips}>
+                            {[
+                              { val: 1.0, label: '100%' },
+                              { val: 0.8, label: '80%' },
+                              { val: 0.5, label: '50%' },
+                              { val: 0.3, label: '30%' },
+                              { val: 0.0, label: '0% (완전투명)' },
+                            ].map((op) => {
+                              const isActive = Math.abs((w.opacity ?? 0.95) - op.val) < 0.05;
+                              return (
+                                <TouchableOpacity
+                                  key={op.label}
+                                  style={[styles.manageOpBtn, isActive && styles.manageOpBtnActive]}
+                                  onPress={() => updateWidget(w.id, { opacity: op.val })}
+                                >
+                                  <Text style={[styles.manageOpText, isActive && styles.manageOpTextActive]}>
+                                    {op.label}
+                                  </Text>
+                                </TouchableOpacity>
+                              );
+                            })}
+                          </ScrollView>
+                        </View>
+
                         {/* Interactive Checklist if available */}
                         {widgetTargetNote.checklist && widgetTargetNote.checklist.length > 0 && (
                           <View style={styles.widgetChecklistWrap}>
@@ -583,6 +626,26 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#64748B',
     marginTop: 2,
+  },
+  optionColumn: {
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  optionHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  opacityValueHighlight: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#2563EB',
+    backgroundColor: '#EFF6FF',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 6,
   },
   optionRow: {
     flexDirection: 'row',
@@ -923,5 +986,52 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#334155',
     flex: 1,
+  },
+  manageOpacityRow: {
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0',
+  },
+  manageOpacityHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginBottom: 6,
+  },
+  manageOpacityLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+  manageOpacityValue: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#2563EB',
+  },
+  manageOpacityChips: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  manageOpBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  manageOpBtnActive: {
+    backgroundColor: '#EFF6FF',
+    borderColor: '#3B82F6',
+  },
+  manageOpText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+  manageOpTextActive: {
+    color: '#2563EB',
+    fontWeight: '700',
   },
 });
