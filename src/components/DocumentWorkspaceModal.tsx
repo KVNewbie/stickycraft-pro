@@ -70,7 +70,7 @@ import { PaperTemplatePattern } from './PaperTemplatePattern';
 import { DraggableAudioPin } from './DraggableAudioPin';
 import { DraggableTextBox } from './DraggableTextBox';
 import { AudioPlayerBar } from './AudioPlayerBar';
-import { recognizeShape, tryRecognizeMultiStroke } from '../utils/shapeRecognizer';
+import { recognizeShape } from '../utils/shapeRecognizer';
 
 interface DocumentWorkspaceModalProps {
   note?: Note | null;
@@ -325,6 +325,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
   // 자유 텍스트 상자 (Goodnotes / Notewise 탭하여 입력)
   const [textBoxes, setTextBoxes] = useState<FreeTextBox[]>(initialNote?.textBoxes || []);
   const [selectedTextBoxId, setSelectedTextBoxId] = useState<string | null>(null);
+  const [defaultTextFontSize, setDefaultTextFontSize] = useState<number>(18);
 
   // 문서 내 단어 검색 (In-Document Search & Navigator)
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -421,6 +422,19 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
   const hasErasedInThisDragRef = useRef(false);
   const isErasingRef = useRef(false);
   const currentStrokeRef = useRef<StrokeWithPage | null>(null);
+
+  // 펜 종류 전환 시 도구에 맞는 스마트 기본 굵기 동기화
+  useEffect(() => {
+    if (activeTool === 'highlighter') {
+      if (strokeWidth < 10) {
+        setStrokeWidth(22);
+      }
+    } else if (activeTool === 'fountain' || activeTool === 'pen') {
+      if (strokeWidth >= 10) {
+        setStrokeWidth(3);
+      }
+    }
+  }, [activeTool]);
 
   // 저장 및 종료
   const handleSaveAndExit = () => {
@@ -918,7 +932,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
             x: Math.max(20, Math.min((pageLayout.width || 600) - 180, locationX)),
             y: Math.max(20, Math.min((pageLayout.height || 800) - 80, locationY)),
             text: '',
-            fontSize: 16,
+            fontSize: defaultTextFontSize || 18,
             color: strokeColorRef.current,
             backgroundColor: 'transparent',
             pageIndex: currentPageRef.current,
@@ -990,7 +1004,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           id: 'strk_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
           points: [{ x: locationX, y: locationY }],
           color: strokeColorRef.current,
-          width: activeToolRef.current === 'highlighter' ? 24 : strokeWidthRef.current,
+          width: strokeWidthRef.current,
           tool:
             activeToolRef.current === 'highlighter'
               ? 'highlighter'
@@ -1174,32 +1188,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
             autoSnapShapeRef.current &&
             (finished.tool === 'fountain' || finished.tool === 'pen' || finished.tool === 'highlighter')
           ) {
-            // 1) Goodnotes 시그니처: 분할된 선들을 연결한 다중 스트로크 자동 결합 (| + ㄱ + ㅡ 등)
-            const multiResult = tryRecognizeMultiStroke(strokesRef.current, finished, 50);
-            if (multiResult) {
-              const { recognized, mergedStrokeIds } = multiResult;
-              const mergedIdSet = new Set(mergedStrokeIds);
-              const mergedStroke: StrokeWithPage = {
-                ...finished,
-                id: 'shape_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
-                points: recognized.points,
-                shapeType: mapShapeType(recognized.type),
-                isPolygon: recognized.isPolygon ?? (recognized.type === 'rectangle' || recognized.type === 'triangle'),
-              };
-              undoStackRef.current = [...undoStackRef.current, strokesRef.current];
-              redoStackRef.current = [];
-              setUndoStack(undoStackRef.current);
-              setRedoStack([]);
-              const remaining = strokesRef.current.filter((s) => !mergedIdSet.has(s.id));
-              const nextStrokes: StrokeWithPage[] = [...remaining, mergedStroke];
-              strokesRef.current = nextStrokes;
-              setStrokes(nextStrokes);
-              setExportToastMessage(`📐 ${mergedStrokeIds.length}개 선이 연결되어 '${recognized.label}'(으)로 자동 결합되었습니다`);
-              setTimeout(() => setExportToastMessage(null), 2000);
-              return;
-            }
-
-            // 2) 단일 스트로크 고정밀 인식
+            // 단일 스트로크 고정밀 인식 (한 번에 그린 획만 변환)
             const recognized = recognizeShape(finished.points);
             if (recognized) {
               processedStroke = {
@@ -1240,7 +1229,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
         x: Math.max(20, Math.min(pageLayout.width - 180, x)),
         y: Math.max(20, Math.min(pageLayout.height - 80, y)),
         text: '',
-        fontSize: 16,
+        fontSize: defaultTextFontSize || 18,
         color: strokeColorRef.current,
         backgroundColor: 'transparent',
         pageIndex: currentPageRef.current,
@@ -1312,7 +1301,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
       id: 'strk_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
       points: [{ x, y }],
       color: strokeColorRef.current,
-      width: activeToolRef.current === 'highlighter' ? 24 : strokeWidthRef.current,
+      width: strokeWidthRef.current,
       tool:
         activeToolRef.current === 'highlighter'
           ? 'highlighter'
@@ -1508,32 +1497,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
         autoSnapShapeRef.current &&
         (finished.tool === 'fountain' || finished.tool === 'pen' || finished.tool === 'highlighter')
       ) {
-        // 1) Goodnotes 시그니처: 분할된 선들을 연결한 다중 스트로크 자동 결합 (| + ㄱ + ㅡ 등)
-        const multiResult = tryRecognizeMultiStroke(strokesRef.current, finished, 50);
-        if (multiResult) {
-          const { recognized, mergedStrokeIds } = multiResult;
-          const mergedIdSet = new Set(mergedStrokeIds);
-          const mergedStroke: StrokeWithPage = {
-            ...finished,
-            id: 'shape_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
-            points: recognized.points,
-            shapeType: mapShapeType(recognized.type),
-            isPolygon: recognized.isPolygon ?? (recognized.type === 'rectangle' || recognized.type === 'triangle'),
-          };
-          undoStackRef.current = [...undoStackRef.current, strokesRef.current];
-          redoStackRef.current = [];
-          setUndoStack(undoStackRef.current);
-          setRedoStack([]);
-          const remaining = strokesRef.current.filter((s) => !mergedIdSet.has(s.id));
-          const nextStrokes: StrokeWithPage[] = [...remaining, mergedStroke];
-          strokesRef.current = nextStrokes;
-          setStrokes(nextStrokes);
-          setExportToastMessage(`📐 ${mergedStrokeIds.length}개 선이 연결되어 '${recognized.label}'(으)로 자동 결합되었습니다`);
-          setTimeout(() => setExportToastMessage(null), 2000);
-          return;
-        }
-
-        // 2) 단일 스트로크 고정밀 인식
+        // 단일 스트로크 고정밀 인식 (한 번에 그린 획만 변환)
         const recognized = recognizeShape(finished.points);
         if (recognized) {
           processedStroke = {
@@ -2877,6 +2841,47 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           </View>
         )}
 
+        {activeTool === 'text' && (
+          <View style={styles.subShapeToolbox}>
+            <Type size={13} color="#2563EB" />
+            <Text style={styles.subShapeLabel}>글자 크기:</Text>
+            {[12, 16, 20, 26, 34].map((sz) => {
+              const currentBox = selectedTextBoxId ? textBoxes.find((t) => t.id === selectedTextBoxId) : null;
+              const isCurrentSize = currentBox ? currentBox.fontSize === sz : defaultTextFontSize === sz;
+              return (
+                <TouchableOpacity
+                  key={sz}
+                  style={[styles.subShapeBtn, isCurrentSize && styles.subShapeBtnActive]}
+                  onPress={() => {
+                    setDefaultTextFontSize(sz);
+                    if (selectedTextBoxId) {
+                      handleUpdateTextBox(selectedTextBoxId, { fontSize: sz });
+                    }
+                  }}
+                  {...(Platform.OS === 'web'
+                    ? ({
+                        onClick: () => {
+                          setDefaultTextFontSize(sz);
+                          if (selectedTextBoxId) {
+                            handleUpdateTextBox(selectedTextBoxId, { fontSize: sz });
+                          }
+                        },
+                      } as any)
+                    : {})}
+                >
+                  <Text style={[styles.subShapeBtnText, isCurrentSize && styles.subShapeBtnTextActive]}>
+                    {sz}px
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+            <View style={{ width: 1, height: 16, backgroundColor: '#E2E8F0', marginHorizontal: 4 }} />
+            <Text style={[styles.subShapeBtnText, { color: '#64748B' }]}>
+              {selectedTextBoxId ? '선택된 상자 크기 변경됨' : '캔버스 클릭 시 텍스트 상자 생성'}
+            </Text>
+          </View>
+        )}
+
         {activeTool === 'eraser' && (
           <View style={styles.subShapeToolbox}>
             <Text style={styles.subShapeLabel}>지우개 크기:</Text>
@@ -3184,7 +3189,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
 
           {/* Goodnotes / Notewise 시그니처 3-Thickness Slot Presets */}
           <View style={styles.widthSelectorGroup}>
-            {[2, 4, 8].map((w) => (
+            {(activeTool === 'highlighter' ? [12, 22, 36] : [2, 4, 8]).map((w) => (
               <TouchableOpacity
                 key={w}
                 style={[styles.widthCircle, strokeWidth === w && styles.widthCircleSelected]}
@@ -3211,9 +3216,9 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
               >
                 <View
                   style={{
-                    width: w === 2 ? 4 : w === 4 ? 7 : 11,
-                    height: w === 2 ? 4 : w === 4 ? 7 : 11,
-                    borderRadius: 6,
+                    width: activeTool === 'highlighter' ? (w === 12 ? 7 : w === 22 ? 11 : 15) : (w === 2 ? 4 : w === 4 ? 7 : 11),
+                    height: activeTool === 'highlighter' ? (w === 12 ? 7 : w === 22 ? 11 : 15) : (w === 2 ? 4 : w === 4 ? 7 : 11),
+                    borderRadius: 8,
                     backgroundColor: strokeWidth === w ? '#2563EB' : '#64748B',
                   }}
                 />

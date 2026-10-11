@@ -45,8 +45,8 @@ interface ColorNoteTextEditorProps {
 const FONT_PRESETS: Record<NoteFontSize, { label: string; size: number; lineHeight: number }> = {
   sm: { label: '소', size: 13, lineHeight: 22 },
   base: { label: '보통', size: 16, lineHeight: 28 },
-  lg: { label: '크게', size: 19, lineHeight: 32 },
-  xl: { label: '특대', size: 23, lineHeight: 38 },
+  lg: { label: '크게', size: 20, lineHeight: 34 },
+  xl: { label: '특대', size: 26, lineHeight: 42 },
 };
 
 export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({

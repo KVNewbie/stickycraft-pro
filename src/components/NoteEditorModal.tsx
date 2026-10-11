@@ -558,7 +558,7 @@ export const NoteEditorModal: React.FC = () => {
   const readTimeMin = Math.max(1, Math.ceil(charCount / 500));
 
   const fontSizeStyle =
-    fontSize === 'sm' ? 13 : fontSize === 'lg' ? 18 : fontSize === 'xl' ? 22 : 15;
+    fontSize === 'sm' ? 13 : fontSize === 'lg' ? 20 : fontSize === 'xl' ? 26 : 16;
 
   const lineHeightMultiplier =
     lineHeight === 'tight' ? 1.3 : lineHeight === 'relaxed' ? 2.0 : 1.6;

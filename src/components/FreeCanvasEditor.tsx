@@ -18,7 +18,7 @@ import { PaperTemplatePattern } from './PaperTemplatePattern';
 import { PaperTemplate, FreeTextBox, NoteImage, AudioNote, FreeHandStroke } from '../types/note';
 import { AudioPlayerBar } from './AudioPlayerBar';
 import { X, Check, Move, Maximize2, Mic, Image as ImageIcon, Volume2 } from 'lucide-react-native';
-import { recognizeShape, tryRecognizeMultiStroke } from '../utils/shapeRecognizer';
+import { recognizeShape } from '../utils/shapeRecognizer';
 
 export interface FreeCanvasEditorRef {
   undo: () => void;
@@ -340,29 +340,8 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
           if (currentStroke && currentStroke.points.length > 1) {
             let finalStroke = currentStroke;
 
-            // Notewise & Goodnotes 스마트 도형 자동 인식 (선, 사각형, 원)
+            // 스마트 도형 자동 인식 (한 번에 그린 단일 획만 변환)
             if (selectedTool === 'shape' || isRulerActive) {
-              const multiResult = tryRecognizeMultiStroke(strokes, currentStroke, 50);
-              if (multiResult) {
-                const { recognized, mergedStrokeIds } = multiResult;
-                const mergedIdSet = new Set(mergedStrokeIds);
-                const mergedStroke: Stroke = {
-                  ...currentStroke,
-                  id: 'shape_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
-                  points: recognized.points,
-                  isRuler: recognized.type === 'line',
-                  shapeType: mapShapeType(recognized.type),
-                  isPolygon: recognized.isPolygon ?? (recognized.type === 'rectangle' || recognized.type === 'triangle'),
-                };
-                const remaining = strokes.filter((s) => !mergedIdSet.has(s.id));
-                const updated = [...remaining, mergedStroke];
-                setStrokes(updated);
-                setRedoStack([]);
-                if (onUpdateStrokes) onUpdateStrokes(updated as any);
-                setCurrentStroke(null);
-                return;
-              }
-
               const recognized = recognizeShape(currentStroke.points);
               if (recognized) {
                 finalStroke = {
@@ -497,10 +476,24 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
                 width={canvasWidth}
                 height={canvasHeight}
                 onPointerDown={(e: any) => {
-                  if (selectedTool === 'text') return;
                   const rect = e.currentTarget.getBoundingClientRect();
                   const x = e.clientX - rect.left;
                   const y = e.clientY - rect.top;
+
+                  if (selectedTool === 'text') {
+                    const newBox: FreeTextBox = {
+                      id: 'tb_' + Date.now(),
+                      x: Math.max(20, Math.min(canvasWidth - 140, x)),
+                      y: Math.max(20, Math.min(canvasHeight - 60, y)),
+                      text: '',
+                      fontSize: 18,
+                      color: currentColor,
+                      backgroundColor: 'transparent',
+                    };
+                    setTextBoxes((prev) => [...prev, newBox]);
+                    setActiveTextId(newBox.id);
+                    return;
+                  }
 
                   if (selectedTool === 'eraser') {
                     setStrokes((prev) =>
@@ -536,28 +529,8 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
                   if (currentStroke && currentStroke.points.length > 1) {
                     let finalStroke = currentStroke;
 
+                    // 스마트 도형 자동 인식 (한 번에 그린 단일 획만 변환)
                     if (selectedTool === 'shape' || isRulerActive) {
-                      const multiResult = tryRecognizeMultiStroke(strokes, currentStroke, 50);
-                      if (multiResult) {
-                        const { recognized, mergedStrokeIds } = multiResult;
-                        const mergedIdSet = new Set(mergedStrokeIds);
-                        const mergedStroke: Stroke = {
-                          ...currentStroke,
-                          id: 'shape_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
-                          points: recognized.points,
-                          isRuler: recognized.type === 'line',
-                          shapeType: mapShapeType(recognized.type),
-                          isPolygon: recognized.isPolygon ?? (recognized.type === 'rectangle' || recognized.type === 'triangle'),
-                        };
-                        const remaining = strokes.filter((s) => !mergedIdSet.has(s.id));
-                        const updated = [...remaining, mergedStroke];
-                        setStrokes(updated);
-                        setRedoStack([]);
-                        if (onUpdateStrokes) onUpdateStrokes(updated as any);
-                        setCurrentStroke(null);
-                        return;
-                      }
-
                       const recognized = recognizeShape(currentStroke.points);
                       if (recognized) {
                         finalStroke = {
@@ -635,39 +608,76 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
             )}
 
             {/* 5. 자유 텍스트 상자 오버레이 */}
-            {textBoxes.map((box) => (
-              <View
-                key={box.id}
-                style={[
-                  styles.textBoxCard,
-                  {
-                    left: box.x,
-                    top: box.y,
-                    borderColor: activeTextId === box.id ? '#3b82f6' : 'transparent',
-                  },
-                ]}
-              >
-                <TextInput
-                  value={box.text}
-                  onChangeText={(val) => {
-                    setTextBoxes((prev) =>
-                      prev.map((b) => (b.id === box.id ? { ...b, text: val } : b))
-                    );
-                  }}
-                  onFocus={() => setActiveTextId(box.id)}
-                  style={styles.textInputStyle}
-                  multiline
-                  placeholder="텍스트 입력..."
-                  placeholderTextColor="#94a3b8"
-                />
-                <TouchableOpacity
-                  onPress={() => setTextBoxes((prev) => prev.filter((b) => b.id !== box.id))}
-                  style={styles.textDeleteBtn}
+            {textBoxes.map((box) => {
+              const boxFontSize = box.fontSize || 18;
+              return (
+                <View
+                  key={box.id}
+                  style={[
+                    styles.textBoxCard,
+                    {
+                      left: box.x,
+                      top: box.y,
+                      borderColor: activeTextId === box.id ? '#3b82f6' : 'transparent',
+                    },
+                  ]}
                 >
-                  <X size={12} color="#dc2626" />
-                </TouchableOpacity>
-              </View>
-            ))}
+                  {/* 상단 컨트롤 바 (선택 시 폰트 크기 조절) */}
+                  {activeTextId === box.id && (
+                    <View style={styles.textBoxControlsRow}>
+                      <TouchableOpacity
+                        style={styles.textBoxFontSizeBtn}
+                        onPress={() => {
+                          const steps = [12, 16, 20, 26, 34];
+                          const idx = steps.indexOf(boxFontSize);
+                          const next = idx >= 0 ? steps[(idx + 1) % steps.length] : 18;
+                          setTextBoxes((prev) =>
+                            prev.map((b) => (b.id === box.id ? { ...b, fontSize: next } : b))
+                          );
+                        }}
+                      >
+                        <Text style={styles.textBoxFontSizeText}>{boxFontSize}px</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        onPress={() => setTextBoxes((prev) => prev.filter((b) => b.id !== box.id))}
+                        style={styles.textDeleteBtnInline}
+                      >
+                        <X size={12} color="#dc2626" />
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                  <TextInput
+                    value={box.text}
+                    onChangeText={(val) => {
+                      setTextBoxes((prev) =>
+                        prev.map((b) => (b.id === box.id ? { ...b, text: val } : b))
+                      );
+                    }}
+                    onFocus={() => setActiveTextId(box.id)}
+                    style={[
+                      styles.textInputStyle,
+                      {
+                        fontSize: boxFontSize,
+                        color: box.color || '#0f172a',
+                        lineHeight: Math.round(boxFontSize * 1.35),
+                        minHeight: Math.round(boxFontSize * 1.4),
+                      },
+                    ]}
+                    multiline
+                    placeholder="텍스트 입력..."
+                    placeholderTextColor="#94a3b8"
+                  />
+                  {activeTextId !== box.id && (
+                    <TouchableOpacity
+                      onPress={() => setTextBoxes((prev) => prev.filter((b) => b.id !== box.id))}
+                      style={styles.textDeleteBtn}
+                    >
+                      <X size={12} color="#dc2626" />
+                    </TouchableOpacity>
+                  )}
+                </View>
+              );
+            })}
           </View>
         </ScrollView>
       </View>
@@ -786,5 +796,33 @@ const styles = StyleSheet.create({
     padding: 3,
     borderWidth: 1,
     borderColor: '#fca5a5',
+  },
+  textBoxControlsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+    paddingBottom: 2,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+    gap: 6,
+  },
+  textBoxFontSizeBtn: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    backgroundColor: '#eff6ff',
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#bfdbfe',
+  },
+  textBoxFontSizeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#2563eb',
+  },
+  textDeleteBtnInline: {
+    padding: 2,
+    backgroundColor: '#fee2e2',
+    borderRadius: 4,
   },
 });

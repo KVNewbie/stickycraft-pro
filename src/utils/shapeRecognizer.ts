@@ -207,6 +207,33 @@ export const computeCornerGap = (points: Point[], bbox: ReturnType<typeof getBou
 };
 
 /**
+ * 도형 중심점을 기준으로 점들의 각도 커버리지(최대 비어있는 각도 갭, 라디안) 계산
+ * - 닫힌 도형(원, 타원, 다각형): 점들이 중심을 360도 둘러싸므로 maxGap이 60도(~1.05 rad) 이하
+ * - 열린 곡선(C, U, V, 괄호 등): 입구가 열려 있으므로 maxGap이 72도(~1.26 rad) 이상
+ */
+export const computeMaxAngleGap = (points: Point[], centerX: number, centerY: number): number => {
+  if (points.length < 3) return Math.PI * 2;
+  const angles: number[] = [];
+  for (let i = 0; i < points.length; i++) {
+    angles.push(Math.atan2(points[i].y - centerY, points[i].x - centerX));
+  }
+  angles.sort((a, b) => a - b);
+  let maxGap = Math.PI * 2 - (angles[angles.length - 1] - angles[0]);
+  for (let i = 1; i < angles.length; i++) {
+    const gap = angles[i] - angles[i - 1];
+    if (gap > maxGap) maxGap = gap;
+  }
+  return maxGap;
+};
+
+/**
+ * 라마누잔(Ramanujan) 제1 공식을 이용한 타원 둘레 근사 계산
+ */
+export const approximateEllipsePerimeter = (rx: number, ry: number): number => {
+  return Math.PI * (3 * (rx + ry) - Math.sqrt((3 * rx + ry) * (rx + 3 * ry)));
+};
+
+/**
  * 단일 스트로크 도형 자동 인식
  */
 export const recognizeShape = (points: Point[]): RecognizedShape | null => {
@@ -232,16 +259,39 @@ export const recognizeShape = (points: Point[]): RecognizedShape | null => {
     };
   }
 
-  // 2. 닫힌 루프 검사 (손글씨 끝점 벌어짐 및 오버슛 포용)
-  let isClosed = directDist < Math.max(70, diag * 0.45);
-  if (!isClosed && points.length > 6) {
-    const headLimit = Math.min(35, Math.floor(points.length * 0.40));
+  // 2. 닫힌 루프 검사 (손글씨 끝점 벌어짐 및 오버슛 포용하되, C/U 같은 열린 획 철저히 배제)
+  // - 시작점과 끝점의 직선거리가 전체 스트로크 길이의 22% 이내이고, 대각선의 25% 이내여야 함
+  const maxCloseDist = Math.max(14, Math.min(42, diag * 0.24));
+  let isClosed = directDist <= maxCloseDist && (directDist / totalLength <= 0.22);
+
+  // 손글씨 오버슛(끝점이 시작점 부근을 지나친 경우) 허용 (단, 시작점 부근 18% 이내만 탐색)
+  if (!isClosed && points.length > 8) {
+    const headLimit = Math.min(12, Math.floor(points.length * 0.18));
     for (let i = 0; i < headLimit; i++) {
-      if (getDistance(points[i], last) < Math.max(65, diag * 0.40)) {
+      const d = getDistance(points[i], last);
+      if (d <= maxCloseDist && (d / totalLength <= 0.22)) {
         isClosed = true;
         break;
       }
     }
+  }
+
+  // 역방향 오버슛(시작점이 끝점 부근을 감싼 경우)
+  if (!isClosed && points.length > 8) {
+    const tailStart = Math.max(points.length - 12, Math.floor(points.length * 0.82));
+    for (let i = tailStart; i < points.length; i++) {
+      const d = getDistance(first, points[i]);
+      if (d <= maxCloseDist && (d / totalLength <= 0.22)) {
+        isClosed = true;
+        break;
+      }
+    }
+  }
+
+  // 닫힌 도형의 핵심 불변 원리: 중심점을 둘러싸야 하므로 각도 갭이 72도(~1.26 rad) 이하여야 함 (C, U, V 등 원천 차단)
+  const maxAngleGap = computeMaxAngleGap(points, bbox.centerX, bbox.centerY);
+  if (maxAngleGap > (72 * Math.PI) / 180) {
+    isClosed = false;
   }
 
   if (!isClosed || bbox.width < 16 || bbox.height < 16) {
@@ -290,14 +340,22 @@ export const recognizeShape = (points: Point[]): RecognizedShape | null => {
   // -----------------------------------------------------------------
   // [1순위] 원 / 타원 판별
   // - 원형의 기하학적 불변 원리: 4개 모서리가 비어 있으므로 cornerGap >= 0.15
-  // - solidity: 0.58 ~ 0.86 (이론값 π/4 ≈ 0.785)
-  // - 타원 피팅 오차 meanEllipseErr <= 0.17 또는 원형도 circularity >= 0.60
+  // - solidity: 0.60 ~ 0.88 (이론값 π/4 ≈ 0.785)
+  // - 타원 둘레 완성도: 실제 스트로크 길이가 이론 둘레의 80%~145% 사이여야 함 (C자 형태 원천 방지)
+  // - 각도 커버리지: 중심 기준 최대 각도 빈틈이 60도 이하
+  // - 타원 피팅 오차 meanEllipseErr <= 0.18 또는 원형도 circularity 0.68 ~ 1.35
   // -----------------------------------------------------------------
+  const idealPerimeter = approximateEllipsePerimeter(rx, ry);
+  const perimeterRatio = idealPerimeter > 0 ? totalLength / idealPerimeter : 0;
+
   const isCircle =
     cornerGap >= 0.15 &&
-    solidity >= 0.58 &&
-    solidity <= 0.86 &&
-    (meanEllipseErr <= 0.17 || circularity >= 0.60);
+    solidity >= 0.60 &&
+    solidity <= 0.88 &&
+    perimeterRatio >= 0.80 &&
+    perimeterRatio <= 1.45 &&
+    maxAngleGap <= (60 * Math.PI) / 180 &&
+    (meanEllipseErr <= 0.18 || (circularity >= 0.68 && circularity <= 1.35));
 
   if (isCircle) {
     return {

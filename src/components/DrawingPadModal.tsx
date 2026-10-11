@@ -163,7 +163,7 @@ export const DrawingPadModal: React.FC<DrawingPadModalProps> = ({
           id: 'stroke_' + Date.now(),
           points: [{ x: locationX, y: locationY }],
           color: selectedColor,
-          width: toolMode === 'highlighter' ? 24 : toolMode === 'fountain' ? selectedWidth * 1.3 : selectedWidth,
+          width: toolMode === 'highlighter' ? (selectedWidth >= 10 ? selectedWidth : 22) : toolMode === 'fountain' ? selectedWidth * 1.3 : selectedWidth,
           tool: toolMode,
           isRuler: isRulerMode,
         };
@@ -240,7 +240,7 @@ export const DrawingPadModal: React.FC<DrawingPadModalProps> = ({
       ctx.globalAlpha = 1.0;
     } else if (toolMode === 'highlighter') {
       ctx.strokeStyle = selectedColor;
-      ctx.lineWidth = 24;
+      ctx.lineWidth = selectedWidth >= 10 ? selectedWidth : 22;
       ctx.globalAlpha = 0.35;
     } else if (toolMode === 'fountain') {
       ctx.strokeStyle = selectedColor;
@@ -270,7 +270,7 @@ export const DrawingPadModal: React.FC<DrawingPadModalProps> = ({
       ctx.moveTo(startPointRef.current.x, startPointRef.current.y);
       ctx.lineTo(x, y);
       ctx.strokeStyle = selectedColor;
-      ctx.lineWidth = toolMode === 'highlighter' ? 24 : selectedWidth;
+      ctx.lineWidth = toolMode === 'highlighter' ? (selectedWidth >= 10 ? selectedWidth : 22) : selectedWidth;
       ctx.globalAlpha = toolMode === 'highlighter' ? 0.35 : 1.0;
       ctx.lineCap = 'round';
       ctx.stroke();
@@ -556,32 +556,37 @@ export const DrawingPadModal: React.FC<DrawingPadModalProps> = ({
             </View>
 
             {/* Stroke Width Selector */}
-            {toolMode !== 'highlighter' && (
-              <View style={styles.strokeWidthGroup}>
-                {STROKE_WIDTHS.slice(0, 3).map((sw) => (
-                  <TouchableOpacity
-                    key={sw.id}
+            <View style={styles.strokeWidthGroup}>
+              {(toolMode === 'highlighter'
+                ? [
+                    { id: 'hl-thin', width: 14, label: '14px' },
+                    { id: 'hl-mid', width: 22, label: '22px' },
+                    { id: 'hl-thick', width: 34, label: '34px' },
+                  ]
+                : STROKE_WIDTHS.slice(0, 3)
+              ).map((sw) => (
+                <TouchableOpacity
+                  key={sw.id}
+                  style={[
+                    styles.strokeBtn,
+                    selectedWidth === sw.width && styles.strokeBtnActive,
+                  ]}
+                  onPress={() => setSelectedWidth(sw.width)}
+                >
+                  <View
                     style={[
-                      styles.strokeBtn,
-                      selectedWidth === sw.width && styles.strokeBtnActive,
+                      styles.strokeDot,
+                      {
+                        width: toolMode === 'highlighter' ? (sw.width === 14 ? 7 : sw.width === 22 ? 11 : 15) : sw.width * 1.5,
+                        height: toolMode === 'highlighter' ? (sw.width === 14 ? 7 : sw.width === 22 ? 11 : 15) : sw.width * 1.5,
+                        backgroundColor:
+                          selectedWidth === sw.width ? '#2563EB' : '#94A3B8',
+                      },
                     ]}
-                    onPress={() => setSelectedWidth(sw.width)}
-                  >
-                    <View
-                      style={[
-                        styles.strokeDot,
-                        {
-                          width: sw.width * 1.5,
-                          height: sw.width * 1.5,
-                          backgroundColor:
-                            selectedWidth === sw.width ? '#2563EB' : '#94A3B8',
-                        },
-                      ]}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </View>
-            )}
+                  />
+                </TouchableOpacity>
+              ))}
+            </View>
 
             {/* Color Palette */}
             {toolMode !== 'eraser' && (

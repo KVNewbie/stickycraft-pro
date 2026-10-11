@@ -116,8 +116,10 @@ export const DraggableTextBox: React.FC<DraggableTextBoxProps> = ({
     onUpdate(textBox.id, { text: val });
   };
 
+  const FONT_SIZE_STEPS = [12, 16, 20, 26, 34];
   const handleCycleFontSize = () => {
-    const nextSize = fontSize === 14 ? 18 : fontSize === 18 ? 24 : 14;
+    const curIdx = FONT_SIZE_STEPS.indexOf(fontSize);
+    const nextSize = curIdx >= 0 ? FONT_SIZE_STEPS[(curIdx + 1) % FONT_SIZE_STEPS.length] : 16;
     setFontSize(nextSize);
     onUpdate(textBox.id, { fontSize: nextSize });
   };
@@ -232,7 +234,8 @@ export const DraggableTextBox: React.FC<DraggableTextBoxProps> = ({
           {
             fontSize,
             color,
-            lineHeight: fontSize * 1.35,
+            lineHeight: Math.round(fontSize * 1.35),
+            minHeight: Math.round(fontSize * 1.4),
           },
         ]}
         value={text}
