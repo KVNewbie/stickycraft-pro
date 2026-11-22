@@ -13,6 +13,8 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import Svg, { Path as SvgPath, Line, Rect, Circle } from 'react-native-svg';
 import { NoteImage, PaperTemplate } from '../types/note';
+import { useNoteStore } from '../store/useNoteStore';
+import { triggerWritingScratch, stopWritingScratch } from '../utils/writingSound';
 
 interface DrawingPadModalProps {
   visible: boolean;
@@ -85,11 +87,16 @@ export const DrawingPadModal: React.FC<DrawingPadModalProps> = ({
   const [undoHistory, setUndoHistory] = useState<NativeStroke[][]>([]);
   const [canvasLayout, setCanvasLayout] = useState({ width: 340, height: 320 });
 
+  const writingSoundEnabled = useNoteStore((s) => s.writingSoundEnabled);
+  const writingSoundEnabledRef = useRef(writingSoundEnabled);
+  writingSoundEnabledRef.current = writingSoundEnabled;
+
   // 웹 HTML5 캔버스 참조
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const isDrawingRef = useRef(false);
   const webHistoryRef = useRef<ImageData[]>([]);
   const startPointRef = useRef<{ x: number; y: number } | null>(null);
+  const lastDrawPointRef = useRef<{ x: number; y: number } | null>(null);
   const snapshotBeforeLineRef = useRef<ImageData | null>(null);
 
   // 캔버스 배경에 페이퍼 템플릿(줄, 모눈, 도트) 그리기 (Web용)
@@ -223,6 +230,7 @@ export const DrawingPadModal: React.FC<DrawingPadModalProps> = ({
     const y = (e.clientY || (e.touches && e.touches[0].clientY)) - rect.top;
 
     startPointRef.current = { x, y };
+    lastDrawPointRef.current = { x, y };
 
     if (isRulerMode) {
       snapshotBeforeLineRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -264,6 +272,16 @@ export const DrawingPadModal: React.FC<DrawingPadModalProps> = ({
     const x = (e.clientX || (e.touches && e.touches[0].clientX)) - rect.left;
     const y = (e.clientY || (e.touches && e.touches[0].clientY)) - rect.top;
 
+    if (lastDrawPointRef.current && toolMode !== 'eraser') {
+      triggerWritingScratch(
+        x - lastDrawPointRef.current.x,
+        y - lastDrawPointRef.current.y,
+        writingSoundEnabledRef.current,
+        toolMode
+      );
+    }
+    lastDrawPointRef.current = { x, y };
+
     if (isRulerMode && startPointRef.current && snapshotBeforeLineRef.current) {
       ctx.putImageData(snapshotBeforeLineRef.current, 0, 0);
       ctx.beginPath();
@@ -282,9 +300,11 @@ export const DrawingPadModal: React.FC<DrawingPadModalProps> = ({
   };
 
   const handleEndDraw = () => {
+    stopWritingScratch();
     if (!isDrawingRef.current || Platform.OS !== 'web') return;
     isDrawingRef.current = false;
     startPointRef.current = null;
+    lastDrawPointRef.current = null;
     snapshotBeforeLineRef.current = null;
     const canvas = canvasRef.current;
     if (!canvas) return;

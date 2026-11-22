@@ -62,8 +62,13 @@ import {
   List,
   RotateCw,
   Volume2,
+  VolumeX,
+  Combine,
+  Scissors,
+  LayoutGrid,
+  Edit3,
 } from 'lucide-react-native';
-import { Note, FreeHandStroke, AudioNote, PaperTemplate, FreeTextBox } from '../types/note';
+import { Note, FreeHandStroke, AudioNote, PaperTemplate, FreeTextBox, PdfPageData } from '../types/note';
 import { useNoteStore } from '../store/useNoteStore';
 import { AudioRecordingStudio } from './AudioRecordingStudio';
 import { PaperTemplatePattern } from './PaperTemplatePattern';
@@ -71,6 +76,18 @@ import { DraggableAudioPin } from './DraggableAudioPin';
 import { DraggableTextBox } from './DraggableTextBox';
 import { AudioPlayerBar } from './AudioPlayerBar';
 import { recognizeShape } from '../utils/shapeRecognizer';
+import {
+  triggerWritingScratch,
+  stopWritingScratch,
+  playWritingSoundPreview,
+} from '../utils/writingSound';
+import {
+  PdfOpenLauncherView,
+  PdfAcrobatStudioPanel,
+  PdfWorkspaceTab,
+  parseUploadedPdfFile,
+  extractPdfPagesFromNote,
+} from './PdfAcrobatStudioPanel';
 
 interface DocumentWorkspaceModalProps {
   note?: Note | null;
@@ -204,15 +221,39 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
   initialMode = 'pdf',
   onClose,
 }) => {
-  const { addNote, updateNote, deleteNote } = useNoteStore();
+  const {
+    notes,
+    addNote,
+    updateNote,
+    deleteNote,
+    writingSoundEnabled,
+    setWritingSoundEnabled,
+  } = useNoteStore();
 
   const isPdfMode = initialMode === 'pdf' || (initialNote?.noteType === 'pdf') || !!initialNote?.pdfUri;
 
+  // 새 메모에서 PDF를 열었을 때는 기존 샘플 문서가 멋대로 열리지 않고 Adobe 스타일 PDF 시작/열기 허브를 표시
+  const [activeNoteId, setActiveNoteId] = useState<string>(initialNote?.id || '');
+  const [isPdfLauncherOpen, setIsPdfLauncherOpen] = useState<boolean>(isPdfMode && !initialNote);
+  const [pdfWorkspaceTab, setPdfWorkspaceTab] = useState<PdfWorkspaceTab>('annotate');
+
+  const initialPdfPages: PdfPageData[] = React.useMemo(() => {
+    if (!isPdfMode) return [];
+    if (initialNote) {
+      return extractPdfPagesFromNote(initialNote);
+    }
+    return [];
+  }, [initialNote, isPdfMode]);
+
+  const [pdfPages, setPdfPages] = useState<PdfPageData[]>(initialPdfPages);
+
   const [title, setTitle] = useState<string>(
-    initialNote?.title || (isPdfMode ? '2026 프로덕트 전략 로드맵.pdf' : '아이디어 캔버스 드로잉')
+    initialNote?.title || (isPdfMode ? '새 PDF 문서.pdf' : '아이디어 캔버스 드로잉')
   );
   const [currentPage, setCurrentPage] = useState<number>(1);
-  const [totalPages, setTotalPages] = useState<number>(isPdfMode ? 3 : 2);
+  const [totalPages, setTotalPages] = useState<number>(
+    isPdfMode ? Math.max(1, initialPdfPages.length || 3) : 2
+  );
   const [paperTemplate, setPaperTemplate] = useState<PaperTemplate>(
     initialNote?.paperTemplate || 'blank'
   );
@@ -365,22 +406,53 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
   // 벤치마크 편의성: 펜 팁 스타일 (만년필 vs 볼펜)
   const [penType, setPenType] = useState<'fountain' | 'pen'>('fountain');
 
-  // 문서 선택 (샘플 문서 동적 매칭)
-  const matchedDoc = React.useMemo(() => {
-    return getSampleDocumentForNote(initialNote?.title, initialNote?.pdfName);
-  }, [initialNote?.title, initialNote?.pdfName]);
+  // 실시간 PDF 페이지 데이터 기반 activeDocument 생성 (업로드/새 문서/병합/분할 100% 반영)
+  const activeDocument = React.useMemo(() => {
+    if (!isPdfMode) return null;
+    if (pdfPages.length > 0) {
+      return {
+        id: activeNoteId || 'custom-pdf',
+        name: title || 'PDF 문서.pdf',
+        pages: pdfPages.map((p, idx) => ({
+          pageNumber: idx + 1,
+          title: p.title,
+          subtitle: p.subtitle || (p.sourcePdfName ? `원본: ${p.sourcePdfName}` : ''),
+          content: p.content,
+        })),
+      };
+    }
+    if (initialNote) {
+      return getSampleDocumentForNote(initialNote.title, initialNote.pdfName);
+    }
+    return null;
+  }, [isPdfMode, pdfPages, activeNoteId, title, initialNote]);
 
-  const initialDocIdx = Math.max(0, SAMPLE_DOCUMENTS.findIndex((d) => d.id === matchedDoc.id));
-  const [selectedDocIndex, setSelectedDocIndex] = useState(initialDocIdx >= 0 ? initialDocIdx : 0);
-  const activeDocument = SAMPLE_DOCUMENTS[selectedDocIndex] || matchedDoc;
-
-  // 캔버스 크기
+  // 캔버스 크기 및 스크롤 뷰 참조 (손바닥 도구 Grab-to-Scroll 지원)
   const pageContainerRef = useRef<View>(null);
+  const canvasScrollRef = useRef<ScrollView>(null);
+  const scrollOffsetRef = useRef({ x: 0, y: 0 });
+  const handInertiaRafRef = useRef<number | null>(null);
+  const [isHandPanning, setIsHandPanning] = useState(false);
   const [pageLayout, setPageLayout] = useState({ width: 720, height: 1018 });
+
+  useEffect(() => {
+    return () => {
+      stopWritingScratch();
+      if (handInertiaRafRef.current !== null && typeof cancelAnimationFrame !== 'undefined') {
+        cancelAnimationFrame(handInertiaRafRef.current);
+      }
+      if (rafStrokeIdRef.current !== null && typeof cancelAnimationFrame !== 'undefined') {
+        cancelAnimationFrame(rafStrokeIdRef.current);
+      }
+    };
+  }, []);
 
   // PanResponder 및 Web 이벤트 클로저 버그 해결을 위한 최신 상태 Mutable Refs
   const activeToolRef = useRef(activeTool);
   activeToolRef.current = activeTool;
+
+  const writingSoundEnabledRef = useRef(writingSoundEnabled);
+  writingSoundEnabledRef.current = writingSoundEnabled;
 
   const shapeTypeRef = useRef(shapeType);
   shapeTypeRef.current = shapeType;
@@ -422,6 +494,8 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
   const hasErasedInThisDragRef = useRef(false);
   const isErasingRef = useRef(false);
   const currentStrokeRef = useRef<StrokeWithPage | null>(null);
+  const rafStrokeIdRef = useRef<number | null>(null);
+  const lastDrawPointRef = useRef<{ x: number; y: number } | null>(null);
 
   // 펜 종류 전환 시 도구에 맞는 스마트 기본 굵기 동기화
   useEffect(() => {
@@ -438,10 +512,19 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
 
   // 저장 및 종료
   const handleSaveAndExit = () => {
-    const finalTitle = title.trim() || (isPdfMode ? 'PDF 문서' : '손글씨 캔버스');
+    stopWritingScratch();
+    if (isPdfMode && isPdfLauncherOpen && !activeNoteId && pdfPages.length === 0) {
+      onClose();
+      return;
+    }
+    const finalTitle = title.trim() || (isPdfMode ? 'PDF 문서.pdf' : '손글씨 캔버스');
     const finalStrokes = strokesRef.current;
-    if (initialNote?.id) {
-      updateNote(initialNote.id, {
+    const normalizedPdfPages = isPdfMode
+      ? pdfPages.map((p, idx) => ({ ...p, pageNumber: idx + 1 }))
+      : undefined;
+
+    if (activeNoteId) {
+      updateNote(activeNoteId, {
         title: finalTitle,
         strokes: finalStrokes,
         paperTemplate,
@@ -449,13 +532,18 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
         textBoxes,
         noteType: isPdfMode ? 'pdf' : 'canvas',
         pdfName: isPdfMode ? finalTitle : undefined,
+        pdfPages: normalizedPdfPages,
         bookmarkedPages,
         pageTemplates,
       });
     } else {
       addNote({
         title: finalTitle,
-        content: isPdfMode ? `[PDF 문서 첨부] ${finalTitle}` : '손글씨 캔버스 필기 메모',
+        content: isPdfMode
+          ? normalizedPdfPages && normalizedPdfPages[0]?.content
+            ? normalizedPdfPages[0].content.slice(0, 180)
+            : `[PDF 문서 첨부] ${finalTitle} (총 ${totalPages}페이지)`
+          : '손글씨 캔버스 필기 메모',
         color: isPdfMode ? 'paper' : 'yellow',
         decoStyle: 'minimal',
         images: [],
@@ -470,6 +558,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
         boardId: 'ideas',
         noteType: isPdfMode ? 'pdf' : 'canvas',
         pdfName: isPdfMode ? finalTitle : undefined,
+        pdfPages: normalizedPdfPages,
         bookmarkedPages,
         pageTemplates,
       });
@@ -480,11 +569,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
   // 템플릿 지정 새 페이지 추가 (Notewise & Goodnotes 페이지 템플릿 생성기)
   const handleAddNewPageWithTemplate = (chosenTemplate: PaperTemplate) => {
     const newPageNum = totalPages + 1;
-    setTotalPages(newPageNum);
-    setPageTemplates((prev) => ({ ...prev, [newPageNum]: chosenTemplate }));
-    setCurrentPage(newPageNum);
-    setIsAddPageTemplateModalOpen(false);
-    setIsOverviewOpen(false);
     const templateNames: Record<PaperTemplate, string> = {
       blank: '무지',
       lined: '줄노트',
@@ -493,6 +577,24 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
       dot: '점 모눈',
       dark: '다크 칠판',
     };
+    if (isPdfMode) {
+      setPdfPages((prev) => [
+        ...prev,
+        {
+          id: `pdfp_${Date.now()}_${newPageNum}_${Math.random().toString(36).substring(2, 6)}`,
+          pageNumber: newPageNum,
+          title: `${title.replace(/\.pdf$/i, '')} — Page ${newPageNum}`,
+          subtitle: `추가된 페이지 (${templateNames[chosenTemplate] || chosenTemplate})`,
+          content: '',
+          sourcePdfName: title,
+        },
+      ]);
+    }
+    setTotalPages(newPageNum);
+    setPageTemplates((prev) => ({ ...prev, [newPageNum]: chosenTemplate }));
+    setCurrentPage(newPageNum);
+    setIsAddPageTemplateModalOpen(false);
+    setIsOverviewOpen(false);
     setExportToastMessage(`📄 페이지 ${newPageNum}번(${templateNames[chosenTemplate] || chosenTemplate})이 추가되었습니다.`);
     setTimeout(() => setExportToastMessage(null), 2500);
   };
@@ -649,6 +751,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           setSelectedStrokeIds([]);
           setSelectionBBox(null);
         }
+        setSelectedTextBoxId(null);
         setIsColorPickerOpen(false);
         setIsTemplateMenuOpen(false);
         setEditingPresetIndex(null);
@@ -713,7 +816,17 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
     if (selectedTextBoxId === id) setSelectedTextBoxId(null);
   };
 
-  // 썸네일 오버뷰 페이지 복제 및 삭제
+  // 페이지별 필기 획 수 집계 (Organize Pages 뷰용)
+  const strokeCountsByPage = React.useMemo(() => {
+    const map: Record<number, number> = {};
+    for (const s of strokes) {
+      const p = s.pageIndex || 1;
+      map[p] = (map[p] || 0) + 1;
+    }
+    return map;
+  }, [strokes]);
+
+  // 썸네일 오버뷰 & 페이지 구성: 페이지 복제
   const handleDuplicatePage = (pNum: number) => {
     const pageStrokes = strokesRef.current.filter((s) => s.pageIndex === pNum);
     const newPageNum = totalPages + 1;
@@ -724,6 +837,25 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
     }));
     strokesRef.current = [...strokesRef.current, ...duplicatedStrokes];
     setStrokes(strokesRef.current);
+
+    if (isPdfMode) {
+      setPdfPages((prev) => {
+        const src = prev[pNum - 1] || {
+          id: `pdfp_${Date.now()}`,
+          pageNumber: pNum,
+          title: `${title} — Page ${pNum}`,
+          subtitle: '',
+          content: '',
+        };
+        const copy: PdfPageData = {
+          ...src,
+          id: `pdfp_${Date.now()}_${newPageNum}_${Math.random().toString(36).substring(2, 6)}`,
+          pageNumber: newPageNum,
+          title: `${src.title} (사본)`,
+        };
+        return [...prev, copy];
+      });
+    }
 
     if (pageTemplates[pNum]) {
       setPageTemplates((prev) => ({ ...prev, [newPageNum]: prev[pNum] }));
@@ -745,6 +877,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
     setTimeout(() => setExportToastMessage(null), 1800);
   };
 
+  // 페이지 삭제 (1개 이하 보호 및 전체 주석 페이지 번호 재정렬)
   const handleDeletePage = (pNum: number) => {
     if (totalPages <= 1) {
       Alert.alert('삭제 불가', '최소 1개의 페이지는 유지되어야 합니다.');
@@ -765,8 +898,309 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
         .filter((t) => (t.pageIndex || 1) !== pNum)
         .map((t) => ((t.pageIndex || 1) > pNum ? { ...t, pageIndex: (t.pageIndex || 1) - 1 } : t))
     );
+    if (isPdfMode) {
+      setPdfPages((prev) =>
+        prev
+          .filter((_, idx) => idx + 1 !== pNum)
+          .map((p, idx) => ({ ...p, pageNumber: idx + 1 }))
+      );
+    }
     setTotalPages((prev) => Math.max(1, prev - 1));
     setCurrentPage((prev) => (prev >= pNum ? Math.max(1, prev - 1) : prev));
+    setExportToastMessage(`🗑️ 페이지 ${pNum}번이 삭제되었습니다.`);
+    setTimeout(() => setExportToastMessage(null), 1800);
+  };
+
+  // Adobe Acrobat 페이지 구성: 페이지 순서 앞뒤 맞바꾸기 (필기/텍스트/오디오/회전 동기 이동)
+  const handleMovePage = (fromPage: number, toPage: number) => {
+    if (fromPage === toPage || toPage < 1 || toPage > totalPages) return;
+    setPdfPages((prev) => {
+      const next = [...prev];
+      const temp = next[fromPage - 1];
+      next[fromPage - 1] = next[toPage - 1];
+      next[toPage - 1] = temp;
+      return next.map((p, idx) => ({ ...p, pageNumber: idx + 1 }));
+    });
+
+    const swapIndex = (idx?: number) => {
+      const p = idx || 1;
+      if (p === fromPage) return toPage;
+      if (p === toPage) return fromPage;
+      return p;
+    };
+
+    const swappedStrokes = strokesRef.current.map((s) => ({
+      ...s,
+      pageIndex: swapIndex(s.pageIndex),
+    }));
+    strokesRef.current = swappedStrokes;
+    setStrokes(swappedStrokes);
+
+    setTextBoxes((prev) => prev.map((t) => ({ ...t, pageIndex: swapIndex(t.pageIndex) })));
+    setAudioNotes((prev) => prev.map((a) => ({ ...a, pageIndex: swapIndex(a.pageIndex) })));
+    setPageRotations((prev) => {
+      const next = { ...prev };
+      const rFrom = prev[fromPage] || 0;
+      const rTo = prev[toPage] || 0;
+      next[fromPage] = rTo;
+      next[toPage] = rFrom;
+      return next;
+    });
+    setCurrentPage(toPage);
+    setExportToastMessage(`🗂️ P.${fromPage} ↔ P.${toPage} 페이지 순서가 변경되었습니다.`);
+    setTimeout(() => setExportToastMessage(null), 1800);
+  };
+
+  // 특정 페이지 90도 회전
+  const handleRotatePageAt = (pNum: number) => {
+    setPageRotations((prev) => {
+      const cur = prev[pNum] || 0;
+      const next = (cur + 90) % 360;
+      setExportToastMessage(`🔄 P.${pNum} 페이지 회전: ${next}°`);
+      setTimeout(() => setExportToastMessage(null), 1500);
+      return { ...prev, [pNum]: next };
+    });
+  };
+
+  // 특정 페이지 뒤에 새 빈 페이지 삽입
+  const handleInsertBlankPageAfter = (afterPage: number) => {
+    const insertIdx = Math.max(0, Math.min(totalPages, afterPage));
+    const newPageNum = insertIdx + 1;
+
+    setPdfPages((prev) => {
+      const blankPage: PdfPageData = {
+        id: `pdfp_${Date.now()}_${newPageNum}_${Math.random().toString(36).substring(2, 6)}`,
+        pageNumber: newPageNum,
+        title: `${title.replace(/\.pdf$/i, '')} — 추가 페이지`,
+        subtitle: `빈 페이지 (P.${afterPage} 뒤에 삽입됨)`,
+        content: '',
+        sourcePdfName: title,
+      };
+      const next = [...prev.slice(0, insertIdx), blankPage, ...prev.slice(insertIdx)];
+      return next.map((p, idx) => ({ ...p, pageNumber: idx + 1 }));
+    });
+
+    const shiftIdx = (idx?: number) => {
+      const p = idx || 1;
+      return p > insertIdx ? p + 1 : p;
+    };
+    const shiftedStrokes = strokesRef.current.map((s) => ({
+      ...s,
+      pageIndex: shiftIdx(s.pageIndex),
+    }));
+    strokesRef.current = shiftedStrokes;
+    setStrokes(shiftedStrokes);
+    setTextBoxes((prev) => prev.map((t) => ({ ...t, pageIndex: shiftIdx(t.pageIndex) })));
+    setAudioNotes((prev) => prev.map((a) => ({ ...a, pageIndex: shiftIdx(a.pageIndex) })));
+
+    setTotalPages((prev) => prev + 1);
+    setCurrentPage(newPageNum);
+    setExportToastMessage(`➕ P.${newPageNum} 위치에 새 빈 페이지가 삽입되었습니다.`);
+    setTimeout(() => setExportToastMessage(null), 1800);
+  };
+
+  // Adobe Acrobat 스타일 PDF 병합 (Merge / Combine PDF)
+  const handleMergePages = (
+    incomingPages: PdfPageData[],
+    sourceNote: Note | null,
+    position: 'append' | 'prepend' | 'after_current'
+  ) => {
+    if (!incomingPages || incomingPages.length === 0) return;
+    const count = incomingPages.length;
+    const insertIndex =
+      position === 'prepend'
+        ? 0
+        : position === 'after_current'
+        ? Math.min(pdfPages.length, currentPage)
+        : pdfPages.length;
+
+    const nextPages = [
+      ...pdfPages.slice(0, insertIndex),
+      ...incomingPages,
+      ...pdfPages.slice(insertIndex),
+    ].map((p, idx) => ({ ...p, pageNumber: idx + 1 }));
+
+    setPdfPages(nextPages);
+    setTotalPages(nextPages.length);
+
+    // 기존 주석들의 페이지 인덱스 시프트
+    const shiftExisting = (pIdx?: number) => {
+      const p = pIdx || 1;
+      return p > insertIndex ? p + count : p;
+    };
+
+    let mergedStrokes: StrokeWithPage[] = strokesRef.current.map((s) => ({
+      ...s,
+      pageIndex: shiftExisting(s.pageIndex),
+    }));
+    let mergedTextBoxes: FreeTextBox[] = textBoxes.map((t) => ({
+      ...t,
+      pageIndex: shiftExisting(t.pageIndex),
+    }));
+    let mergedAudios: AudioNote[] = audioNotes.map((a) => ({
+      ...a,
+      pageIndex: shiftExisting(a.pageIndex),
+    }));
+
+    // 병합 원본 노트에 있던 필기/텍스트/오디오도 페이지 번호를 맞춰 함께 병합
+    if (sourceNote) {
+      if (sourceNote.strokes && sourceNote.strokes.length > 0) {
+        const incomingStrokes: StrokeWithPage[] = sourceNote.strokes.map((s) => ({
+          ...s,
+          id: `strk_m_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          pageIndex: (s.pageIndex || 1) + insertIndex,
+        }));
+        mergedStrokes = [...mergedStrokes, ...incomingStrokes];
+      }
+      if (sourceNote.textBoxes && sourceNote.textBoxes.length > 0) {
+        const incomingBoxes: FreeTextBox[] = sourceNote.textBoxes.map((t) => ({
+          ...t,
+          id: `tb_m_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          pageIndex: (t.pageIndex || 1) + insertIndex,
+        }));
+        mergedTextBoxes = [...mergedTextBoxes, ...incomingBoxes];
+      }
+      if (sourceNote.audioNotes && sourceNote.audioNotes.length > 0) {
+        const incomingAudios: AudioNote[] = sourceNote.audioNotes.map((a) => ({
+          ...a,
+          id: `aud_m_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          pageIndex: (a.pageIndex || 1) + insertIndex,
+        }));
+        mergedAudios = [...mergedAudios, ...incomingAudios];
+      }
+    }
+
+    strokesRef.current = mergedStrokes;
+    setStrokes(mergedStrokes);
+    setTextBoxes(mergedTextBoxes);
+    setAudioNotes(mergedAudios);
+    setCurrentPage(insertIndex + 1);
+    setPdfWorkspaceTab('organize');
+    setExportToastMessage(
+      `📑 ${count}페이지가 병합되었습니다! (현재 총 ${nextPages.length}페이지)`
+    );
+    setTimeout(() => setExportToastMessage(null), 2800);
+  };
+
+  // Adobe Acrobat 스타일 PDF 분할 및 추출 (Split / Extract PDF)
+  const handleSplitPages = (
+    selectedPageNums: number[],
+    removeOriginalPages: boolean,
+    newDocTitle: string
+  ) => {
+    if (!selectedPageNums || selectedPageNums.length === 0) return;
+    const sorted = [...selectedPageNums].sort((a, b) => a - b);
+    const pageMap = new Map<number, number>();
+    sorted.forEach((oldPageNum, idx) => {
+      pageMap.set(oldPageNum, idx + 1);
+    });
+
+    const extractedPages: PdfPageData[] = sorted
+      .map((pNum, idx) => {
+        const src = pdfPages[pNum - 1];
+        if (!src) return null;
+        return {
+          ...src,
+          id: `pdfp_split_${Date.now()}_${idx + 1}_${Math.random().toString(36).substring(2, 6)}`,
+          pageNumber: idx + 1,
+        };
+      })
+      .filter(Boolean) as PdfPageData[];
+
+    const extractedStrokes = strokesRef.current
+      .filter((s) => pageMap.has(s.pageIndex || 1))
+      .map((s) => ({
+        ...s,
+        id: `strk_sp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        pageIndex: pageMap.get(s.pageIndex || 1) || 1,
+      }));
+
+    const extractedBoxes = textBoxes
+      .filter((t) => pageMap.has(t.pageIndex || 1))
+      .map((t) => ({
+        ...t,
+        id: `tb_sp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        pageIndex: pageMap.get(t.pageIndex || 1) || 1,
+      }));
+
+    const extractedAudios = audioNotes
+      .filter((a) => pageMap.has(a.pageIndex || 1))
+      .map((a) => ({
+        ...a,
+        id: `aud_sp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        pageIndex: pageMap.get(a.pageIndex || 1) || 1,
+      }));
+
+    const finalNewTitle = newDocTitle.endsWith('.pdf') ? newDocTitle : `${newDocTitle}.pdf`;
+
+    addNote({
+      title: finalNewTitle,
+      pdfName: finalNewTitle,
+      pdfPages: extractedPages,
+      content:
+        extractedPages[0]?.content?.slice(0, 180) ||
+        `[분할 추출된 PDF] 원본: ${title} (${extractedPages.length}페이지)`,
+      color: 'paper',
+      decoStyle: 'minimal',
+      images: [],
+      checklist: [],
+      tags: ['PDF', '분할문서'],
+      isPinned: false,
+      isLocked: false,
+      strokes: extractedStrokes,
+      textBoxes: extractedBoxes,
+      audioNotes: extractedAudios,
+      paperTemplate,
+      boardId: 'ideas',
+      noteType: 'pdf',
+      bookmarkedPages: [1],
+      pageTemplates: {},
+    });
+
+    if (removeOriginalPages && sorted.length < pdfPages.length) {
+      const remainingSet = new Set(sorted);
+      const remainingMap = new Map<number, number>();
+      let newIdx = 1;
+      const remainingPages: PdfPageData[] = [];
+      pdfPages.forEach((p, idx) => {
+        const oldNum = idx + 1;
+        if (!remainingSet.has(oldNum)) {
+          remainingMap.set(oldNum, newIdx);
+          remainingPages.push({ ...p, pageNumber: newIdx });
+          newIdx++;
+        }
+      });
+
+      const remainingStrokes = strokesRef.current
+        .filter((s) => remainingMap.has(s.pageIndex || 1))
+        .map((s) => ({ ...s, pageIndex: remainingMap.get(s.pageIndex || 1) || 1 }));
+      strokesRef.current = remainingStrokes;
+      setStrokes(remainingStrokes);
+
+      setTextBoxes((prev) =>
+        prev
+          .filter((t) => remainingMap.has(t.pageIndex || 1))
+          .map((t) => ({ ...t, pageIndex: remainingMap.get(t.pageIndex || 1) || 1 }))
+      );
+      setAudioNotes((prev) =>
+        prev
+          .filter((a) => remainingMap.has(a.pageIndex || 1))
+          .map((a) => ({ ...a, pageIndex: remainingMap.get(a.pageIndex || 1) || 1 }))
+      );
+
+      setPdfPages(remainingPages);
+      setTotalPages(remainingPages.length);
+      setCurrentPage(1);
+      setPdfWorkspaceTab('organize');
+      setExportToastMessage(
+        `✂️ '${finalNewTitle}'(${extractedPages.length}장)으로 분리 완료! 현재 문서에는 ${remainingPages.length}장이 남았습니다.`
+      );
+    } else {
+      setExportToastMessage(
+        `✂️ '${finalNewTitle}'(${extractedPages.length}장) 새 PDF 메모가 워크스페이스에 생성되었습니다!`
+      );
+    }
+    setTimeout(() => setExportToastMessage(null), 3200);
   };
 
   // 문서 내 단어 검색 일치 목록 및 위치 탐색
@@ -942,6 +1376,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           setActiveTool('hand');
           return;
         }
+        setSelectedTextBoxId(null);
 
         if (activeToolRef.current === 'laser') {
           if (laserFadeTimerRef.current) clearTimeout(laserFadeTimerRef.current);
@@ -1064,6 +1499,17 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
 
         if (!currentStrokeRef.current) return;
 
+        const prevPoints = currentStrokeRef.current.points;
+        const lastPt = prevPoints[prevPoints.length - 1];
+        if (lastPt) {
+          triggerWritingScratch(
+            locationX - lastPt.x,
+            locationY - lastPt.y,
+            writingSoundEnabledRef.current,
+            currentStrokeRef.current.tool
+          );
+        }
+
         if (currentStrokeRef.current.tool === 'shape') {
           currentStrokeRef.current = {
             ...currentStrokeRef.current,
@@ -1080,6 +1526,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
         setCurrentStroke(currentStrokeRef.current);
       },
       onPanResponderRelease: () => {
+        stopWritingScratch();
         if (activeToolRef.current === 'laser') {
           setLaserPoint(null);
           if (laserFadeTimerRef.current) clearTimeout(laserFadeTimerRef.current);
@@ -1188,7 +1635,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
             autoSnapShapeRef.current &&
             (finished.tool === 'fountain' || finished.tool === 'pen' || finished.tool === 'highlighter')
           ) {
-            // 단일 스트로크 고정밀 인식 (한 번에 그린 획만 변환)
             const recognized = recognizeShape(finished.points);
             if (recognized) {
               processedStroke = {
@@ -1213,10 +1659,131 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
     })
   ).current;
 
-  // 데스크톱 웹 마우스 드래그 핸들러
+  // 손바닥 도구(Hand Tool) 공통 Grab-to-Scroll 핸들러 (꾹 누르고 위아래/좌우 밀기 + 자연스러운 관성 스크롤)
+  const findScrollableAncestor = (startEl: HTMLElement | null): HTMLElement | null => {
+    const scrollRefNode: HTMLElement | null =
+      (canvasScrollRef.current as any)?.getScrollableNode?.() || null;
+    if (scrollRefNode && scrollRefNode.scrollHeight > scrollRefNode.clientHeight + 2) {
+      return scrollRefNode;
+    }
+    let cur: HTMLElement | null = startEl;
+    while (cur && cur !== document.body) {
+      try {
+        const cs = window.getComputedStyle(cur);
+        const canScrollY =
+          (cs.overflowY === 'auto' || cs.overflowY === 'scroll') &&
+          cur.scrollHeight > cur.clientHeight + 2;
+        const canScrollX =
+          (cs.overflowX === 'auto' || cs.overflowX === 'scroll') &&
+          cur.scrollWidth > cur.clientWidth + 2;
+        if (canScrollY || canScrollX) return cur;
+      } catch {
+        // ignore
+      }
+      cur = cur.parentElement;
+    }
+    return scrollRefNode;
+  };
+
+  const startHandDragScroll = (e: any) => {
+    if (Platform.OS !== 'web' || activeToolRef.current !== 'hand') return;
+    if (e._handScrollHandled) return;
+    const targetTag = (e.target as HTMLElement)?.tagName?.toLowerCase?.() || '';
+    if (targetTag === 'input' || targetTag === 'textarea' || targetTag === 'button') return;
+
+    e._handScrollHandled = true;
+    e.preventDefault?.();
+
+    if (handInertiaRafRef.current !== null && typeof cancelAnimationFrame !== 'undefined') {
+      cancelAnimationFrame(handInertiaRafRef.current);
+      handInertiaRafRef.current = null;
+    }
+
+    setSelectedTextBoxId(null);
+    setIsHandPanning(true);
+
+    const startClientY = e.clientY;
+    const startClientX = e.clientX;
+    const scrollNode = findScrollableAncestor((e.currentTarget || e.target) as HTMLElement | null);
+
+    const startScrollY = scrollNode ? scrollNode.scrollTop : scrollOffsetRef.current.y;
+    const startScrollX = scrollNode ? scrollNode.scrollLeft : scrollOffsetRef.current.x;
+
+    let lastClientY = e.clientY;
+    let lastClientX = e.clientX;
+    let velocityY = 0;
+    let velocityX = 0;
+
+    const onHandMove = (ev: MouseEvent) => {
+      ev.preventDefault();
+      const dy = ev.clientY - startClientY;
+      const dx = ev.clientX - startClientX;
+      velocityY = ev.clientY - lastClientY;
+      velocityX = ev.clientX - lastClientX;
+      lastClientY = ev.clientY;
+      lastClientX = ev.clientX;
+
+      const maxScrollY = scrollNode ? Math.max(0, scrollNode.scrollHeight - scrollNode.clientHeight) : 5000;
+      const maxScrollX = scrollNode ? Math.max(0, scrollNode.scrollWidth - scrollNode.clientWidth) : 2000;
+      const nextY = Math.max(0, Math.min(maxScrollY, startScrollY - dy));
+      const nextX = Math.max(0, Math.min(maxScrollX, startScrollX - dx));
+      scrollOffsetRef.current = { x: nextX, y: nextY };
+      if (scrollNode) {
+        scrollNode.scrollTop = nextY;
+        scrollNode.scrollLeft = nextX;
+      } else {
+        canvasScrollRef.current?.scrollTo({ y: nextY, animated: false });
+      }
+    };
+
+    const onHandUp = () => {
+      setIsHandPanning(false);
+      window.removeEventListener('mousemove', onHandMove);
+      window.removeEventListener('mouseup', onHandUp);
+
+      // 손으로 밀었을 때 자연스럽게 감속하며 미끄러지는 관성 스크롤 (Momentum Inertia)
+      if ((Math.abs(velocityY) > 1.5 || Math.abs(velocityX) > 1.5) && typeof requestAnimationFrame !== 'undefined') {
+        let vy = -velocityY * 0.95;
+        let vx = -velocityX * 0.95;
+        const stepInertia = () => {
+          if (Math.abs(vy) < 0.45 && Math.abs(vx) < 0.45) {
+            handInertiaRafRef.current = null;
+            return;
+          }
+          const curY = scrollNode ? scrollNode.scrollTop : scrollOffsetRef.current.y;
+          const curX = scrollNode ? scrollNode.scrollLeft : scrollOffsetRef.current.x;
+          const maxScrollY = scrollNode ? Math.max(0, scrollNode.scrollHeight - scrollNode.clientHeight) : 5000;
+          const maxScrollX = scrollNode ? Math.max(0, scrollNode.scrollWidth - scrollNode.clientWidth) : 2000;
+          const nextY = Math.max(0, Math.min(maxScrollY, curY + vy));
+          const nextX = Math.max(0, Math.min(maxScrollX, curX + vx));
+          scrollOffsetRef.current = { x: nextX, y: nextY };
+          if (scrollNode) {
+            scrollNode.scrollTop = nextY;
+            scrollNode.scrollLeft = nextX;
+          } else {
+            canvasScrollRef.current?.scrollTo({ y: nextY, animated: false });
+          }
+          vy *= 0.92;
+          vx *= 0.92;
+          handInertiaRafRef.current = requestAnimationFrame(stepInertia);
+        };
+        handInertiaRafRef.current = requestAnimationFrame(stepInertia);
+      }
+    };
+
+    window.addEventListener('mousemove', onHandMove);
+    window.addEventListener('mouseup', onHandUp);
+  };
+
+  // 데스크톱 웹 마우스 드래그 핸들러 (손바닥 Grab-to-Scroll + 60fps 무끊김 필기 + 사각사각 ASMR 사운드)
   const handleWebMouseDown = (e: any) => {
     if (Platform.OS !== 'web') return;
-    if (activeToolRef.current === 'hand') return;
+
+    // 손바닥 도구(Hand Tool): 꾹 누르고 위아래/좌우로 밀면 자연스럽게 스크롤 + 관성 모멘텀
+    if (activeToolRef.current === 'hand') {
+      startHandDragScroll(e);
+      return;
+    }
 
     const rect = e.currentTarget.getBoundingClientRect();
     const z = zoomLevelRef.current || 1.0;
@@ -1239,6 +1806,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
       setActiveTool('hand');
       return;
     }
+    setSelectedTextBoxId(null);
 
     if (activeToolRef.current === 'laser') {
       if (laserFadeTimerRef.current) clearTimeout(laserFadeTimerRef.current);
@@ -1279,6 +1847,8 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
       handleEraseAt(x, y);
       return;
     }
+
+    lastDrawPointRef.current = { x, y };
 
     if (activeToolRef.current === 'shape') {
       const shapeStroke: StrokeWithPage = {
@@ -1369,24 +1939,55 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
 
     if (!currentStrokeRef.current) return;
 
+    const lastPt = lastDrawPointRef.current;
+    const dx = lastPt ? x - lastPt.x : 2;
+    const dy = lastPt ? y - lastPt.y : 2;
+    if (lastPt && Math.hypot(dx, dy) < 1.1) return;
+
+    lastDrawPointRef.current = { x, y };
+    triggerWritingScratch(dx, dy, writingSoundEnabledRef.current, currentStrokeRef.current.tool);
+
     if (currentStrokeRef.current.tool === 'shape') {
       currentStrokeRef.current = {
         ...currentStrokeRef.current,
         shapeEnd: { x, y },
       };
-      setCurrentStroke(currentStrokeRef.current);
+      if (rafStrokeIdRef.current === null && typeof requestAnimationFrame !== 'undefined') {
+        rafStrokeIdRef.current = requestAnimationFrame(() => {
+          rafStrokeIdRef.current = null;
+          if (currentStrokeRef.current) {
+            setCurrentStroke({ ...currentStrokeRef.current });
+          }
+        });
+      } else if (typeof requestAnimationFrame === 'undefined') {
+        setCurrentStroke(currentStrokeRef.current);
+      }
       return;
     }
 
-    currentStrokeRef.current = {
-      ...currentStrokeRef.current,
-      points: [...currentStrokeRef.current.points, { x, y }],
-    };
-    setCurrentStroke(currentStrokeRef.current);
+    currentStrokeRef.current.points.push({ x, y });
+    if (rafStrokeIdRef.current === null && typeof requestAnimationFrame !== 'undefined') {
+      rafStrokeIdRef.current = requestAnimationFrame(() => {
+        rafStrokeIdRef.current = null;
+        if (currentStrokeRef.current) {
+          setCurrentStroke({
+            ...currentStrokeRef.current,
+            points: [...currentStrokeRef.current.points],
+          });
+        }
+      });
+    } else if (typeof requestAnimationFrame === 'undefined') {
+      setCurrentStroke({ ...currentStrokeRef.current });
+    }
   };
 
   const handleWebMouseUp = () => {
     if (Platform.OS !== 'web') return;
+    stopWritingScratch();
+    if (rafStrokeIdRef.current !== null && typeof cancelAnimationFrame !== 'undefined') {
+      cancelAnimationFrame(rafStrokeIdRef.current);
+      rafStrokeIdRef.current = null;
+    }
     if (activeToolRef.current === 'hand' || activeToolRef.current === 'text') return;
 
     if (activeToolRef.current === 'laser') {
@@ -1523,17 +2124,23 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
   // 현재 페이지의 스트로크 필터링
   const currentPageStrokes = strokes.filter((s) => s.pageIndex === currentPage);
 
-  // 내 파일에서 PDF 업로드 (Web 지원)
+  // 내 파일에서 PDF 업로드 (실제 PDF 파일 파싱 및 페이지 로드)
   const handlePickDocument = () => {
     if (Platform.OS === 'web') {
       const input = document.createElement('input');
       input.type = 'file';
-      input.accept = 'application/pdf,image/*';
-      input.onchange = (e: any) => {
-        const file = e.target?.files?.[0];
+      input.accept = 'application/pdf,.pdf';
+      input.onchange = async (e: any) => {
+        const file: File | undefined = e.target?.files?.[0];
         if (file) {
-          setTitle(file.name);
-          Alert.alert('문서 로드 완료', `'${file.name}' 문서가 성공적으로 열렸습니다.`);
+          const parsed = await parseUploadedPdfFile(file);
+          setTitle(parsed.fileName);
+          setPdfPages(parsed.pages);
+          setTotalPages(parsed.pages.length);
+          setCurrentPage(1);
+          setIsPdfLauncherOpen(false);
+          setExportToastMessage(`📄 '${parsed.fileName}' (${parsed.pages.length}페이지) 문서를 불러왔습니다.`);
+          setTimeout(() => setExportToastMessage(null), 2500);
         }
       };
       input.click();
@@ -1557,6 +2164,90 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
     { color: '#8B5CF6', label: '소프트 라일락' },
     { color: '#64748B', label: '슬레이트 그레이' },
   ];
+
+  const existingPdfNotes = React.useMemo(
+    () =>
+      notes.filter(
+        (n) =>
+          !n.isDeleted &&
+          (n.noteType === 'pdf' ||
+            Boolean(n.pdfName) ||
+            Boolean(n.pdfPages && n.pdfPages.length > 0))
+      ),
+    [notes]
+  );
+
+  if (isPdfMode && isPdfLauncherOpen) {
+    return (
+      <SafeAreaView style={styles.workspaceContainer} edges={['top', 'left', 'right', 'bottom']}>
+        <PdfOpenLauncherView
+          existingPdfNotes={existingPdfNotes}
+          onOpenUploadedPdf={(fileName, pages, initialTab) => {
+            setTitle(fileName);
+            setPdfPages(pages);
+            setTotalPages(pages.length);
+            setCurrentPage(1);
+            setPdfWorkspaceTab(initialTab);
+            setIsPdfLauncherOpen(false);
+            setExportToastMessage(`📄 '${fileName}' (${pages.length}페이지) 문서를 불러왔습니다.`);
+            setTimeout(() => setExportToastMessage(null), 2500);
+          }}
+          onCreateBlankPdf={(docName, pageCount, tpl, initialTab) => {
+            const cleanName = docName.replace(/\.pdf$/i, '');
+            const blankPages: PdfPageData[] = Array.from({ length: pageCount }).map((_, idx) => ({
+              id: `pdfp_new_${Date.now()}_${idx + 1}`,
+              pageNumber: idx + 1,
+              title: `${cleanName} — Page ${idx + 1}`,
+              subtitle: `${docName} (${idx + 1}/${pageCount} 페이지)`,
+              content: '',
+              sourcePdfName: docName,
+            }));
+            setTitle(docName);
+            setPdfPages(blankPages);
+            setTotalPages(pageCount);
+            setPaperTemplate(tpl);
+            setCurrentPage(1);
+            setPdfWorkspaceTab(initialTab);
+            setIsPdfLauncherOpen(false);
+            setExportToastMessage(`📄 새 PDF 문서 '${docName}' (${pageCount}페이지)가 생성되었습니다.`);
+            setTimeout(() => setExportToastMessage(null), 2500);
+          }}
+          onSelectExistingNote={(pickedNote, initialTab) => {
+            const extracted = extractPdfPagesFromNote(pickedNote);
+            setActiveNoteId(pickedNote.id);
+            setTitle(pickedNote.title || pickedNote.pdfName || 'PDF 문서.pdf');
+            setPdfPages(extracted);
+            setTotalPages(extracted.length);
+            setCurrentPage(1);
+            const existingStrokes = ((pickedNote.strokes as StrokeWithPage[]) || []).map((s) => ({
+              ...s,
+              pageIndex: s.pageIndex || 1,
+            }));
+            strokesRef.current = existingStrokes;
+            setStrokes(existingStrokes);
+            setTextBoxes(pickedNote.textBoxes || []);
+            setAudioNotes(pickedNote.audioNotes || []);
+            setPaperTemplate(pickedNote.paperTemplate || 'blank');
+            setBookmarkedPages(
+              pickedNote.bookmarkedPages && pickedNote.bookmarkedPages.length > 0
+                ? pickedNote.bookmarkedPages
+                : [1]
+            );
+            setPageTemplates(pickedNote.pageTemplates || {});
+            setPdfWorkspaceTab(initialTab);
+            setIsPdfLauncherOpen(false);
+          }}
+          onCancel={() => {
+            if (pdfPages.length > 0) {
+              setIsPdfLauncherOpen(false);
+            } else {
+              onClose();
+            }
+          }}
+        />
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.workspaceContainer} edges={['top', 'left', 'right', 'bottom']}>
@@ -1828,6 +2519,110 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
         </View>
       </View>
 
+      {/* Adobe Acrobat 스타일 PDF 4대 모드 전환 바 (편집/주석 | 페이지 구성 | 병합(Merge) | 분할(Split)) */}
+      {isPdfMode && !isFullscreen && (
+        <View style={styles.acrobatModeBar}>
+          <View style={styles.acrobatTabGroup}>
+            <TouchableOpacity
+              style={[
+                styles.acrobatTabBtn,
+                pdfWorkspaceTab === 'annotate' && styles.acrobatTabBtnActiveBlue,
+              ]}
+              onPress={() => setPdfWorkspaceTab('annotate')}
+              {...(Platform.OS === 'web' ? ({ onClick: () => setPdfWorkspaceTab('annotate') } as any) : {})}
+            >
+              <Edit3
+                size={13}
+                color={pdfWorkspaceTab === 'annotate' ? '#1D4ED8' : '#475569'}
+              />
+              <Text
+                style={[
+                  styles.acrobatTabText,
+                  pdfWorkspaceTab === 'annotate' && styles.acrobatTabTextActiveBlue,
+                ]}
+              >
+                편집 / 필기 주석
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.acrobatTabBtn,
+                pdfWorkspaceTab === 'organize' && styles.acrobatTabBtnActiveGreen,
+              ]}
+              onPress={() => setPdfWorkspaceTab('organize')}
+              {...(Platform.OS === 'web' ? ({ onClick: () => setPdfWorkspaceTab('organize') } as any) : {})}
+            >
+              <LayoutGrid
+                size={13}
+                color={pdfWorkspaceTab === 'organize' ? '#047857' : '#475569'}
+              />
+              <Text
+                style={[
+                  styles.acrobatTabText,
+                  pdfWorkspaceTab === 'organize' && styles.acrobatTabTextActiveGreen,
+                ]}
+              >
+                페이지 구성 ({totalPages}장)
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.acrobatTabBtn,
+                pdfWorkspaceTab === 'merge' && styles.acrobatTabBtnActivePurple,
+              ]}
+              onPress={() => setPdfWorkspaceTab('merge')}
+              {...(Platform.OS === 'web' ? ({ onClick: () => setPdfWorkspaceTab('merge') } as any) : {})}
+            >
+              <Combine
+                size={13}
+                color={pdfWorkspaceTab === 'merge' ? '#6D28D9' : '#475569'}
+              />
+              <Text
+                style={[
+                  styles.acrobatTabText,
+                  pdfWorkspaceTab === 'merge' && styles.acrobatTabTextActivePurple,
+                ]}
+              >
+                PDF 병합 (Merge)
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.acrobatTabBtn,
+                pdfWorkspaceTab === 'split' && styles.acrobatTabBtnActiveRed,
+              ]}
+              onPress={() => setPdfWorkspaceTab('split')}
+              {...(Platform.OS === 'web' ? ({ onClick: () => setPdfWorkspaceTab('split') } as any) : {})}
+            >
+              <Scissors
+                size={13}
+                color={pdfWorkspaceTab === 'split' ? '#B91C1C' : '#475569'}
+              />
+              <Text
+                style={[
+                  styles.acrobatTabText,
+                  pdfWorkspaceTab === 'split' && styles.acrobatTabTextActiveRed,
+                ]}
+              >
+                PDF 분할 / 추출 (Split)
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          <TouchableOpacity
+            style={styles.acrobatOpenHubBtn}
+            onPress={() => setIsPdfLauncherOpen(true)}
+            {...(Platform.OS === 'web' ? ({ onClick: () => setIsPdfLauncherOpen(true) } as any) : {})}
+          >
+            <Upload size={12} color="#2563EB" />
+            <Text style={styles.acrobatOpenHubText}>다른 PDF 열기 / 새 문서 허브</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* 전체화면 복원 플로팅 버튼 */}
       {isFullscreen && (
         <TouchableOpacity
@@ -1986,11 +2781,11 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
       )}
 
       {/* 손바닥 탐색 모드 알림 배너 */}
-      {activeTool === 'hand' && (
+      {activeTool === 'hand' && (!isPdfMode || pdfWorkspaceTab === 'annotate') && (
         <View style={styles.handModeNoticeBanner}>
           <Hand size={14} color="#059669" />
           <Text style={styles.handModeNoticeText}>
-            손바닥 탐색 모드: 필기 방지 활성화 (부드럽게 스크롤하며 문서를 읽을 수 있습니다)
+            손바닥 탐색 모드: 문서를 꾹 누른 채 위아래로 밀면 부드럽게 드래그 스크롤됩니다 (필기 방지 활성화)
           </Text>
         </View>
       )}
@@ -2048,8 +2843,32 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
         </View>
       )}
 
-      {/* 2. 중앙 메인 작업 영역 (PDF 및 드로잉 캔버스) */}
+      {/* 2. 중앙 메인 작업 영역 (PDF 편집/병합/분할/구성 및 드로잉 캔버스) */}
       <View style={styles.workspaceBody}>
+        {isPdfMode && pdfWorkspaceTab !== 'annotate' ? (
+          <PdfAcrobatStudioPanel
+            mode={pdfWorkspaceTab}
+            title={title}
+            pdfPages={pdfPages}
+            currentPage={currentPage}
+            pageRotations={pageRotations}
+            strokeCountsByPage={strokeCountsByPage}
+            allNotes={notes}
+            currentNoteId={activeNoteId}
+            onSelectPageAndAnnotate={(pNum) => {
+              setCurrentPage(pNum);
+              setPdfWorkspaceTab('annotate');
+            }}
+            onMovePage={handleMovePage}
+            onRotatePage={handleRotatePageAt}
+            onDuplicatePage={handleDuplicatePage}
+            onDeletePage={handleDeletePage}
+            onInsertBlankPageAfter={handleInsertBlankPageAfter}
+            onMergePages={handleMergePages}
+            onSplitPages={handleSplitPages}
+          />
+        ) : (
+          <>
         {/* 썸네일 오버뷰 사이드 드로어 (페이지 관리: 복제/삭제/추가) */}
         {isOverviewOpen && (
           <View style={styles.thumbnailSidebar}>
@@ -2260,9 +3079,25 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
 
         {/* 스크롤 가능한 메인 문서 A4 뷰 */}
         <ScrollView
-          style={styles.canvasScrollView}
+          ref={canvasScrollRef}
+          style={[
+            styles.canvasScrollView,
+            Platform.OS === 'web' && activeTool === 'hand'
+              ? ({ cursor: isHandPanning ? 'grabbing' : 'grab', userSelect: 'none' } as any)
+              : null,
+          ]}
           contentContainerStyle={styles.canvasScrollContent}
           showsVerticalScrollIndicator={true}
+          scrollEventThrottle={16}
+          onScroll={(e) => {
+            scrollOffsetRef.current = {
+              x: e.nativeEvent.contentOffset.x,
+              y: e.nativeEvent.contentOffset.y,
+            };
+          }}
+          {...(Platform.OS === 'web' && activeTool === 'hand'
+            ? ({ onMouseDown: startHandDragScroll } as any)
+            : {})}
         >
           {/* A4 스타일 문서 시트 (고해상도 그림자 및 경계선) */}
           <View
@@ -2329,22 +3164,27 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
             <View
               style={[
                 StyleSheet.absoluteFill,
-                Platform.OS === 'web' && {
-                  cursor:
-                    activeTool === 'eraser'
-                      ? 'crosshair'
-                      : activeTool === 'hand'
-                      ? 'grab'
-                      : activeTool === 'text'
-                      ? 'text'
-                      : activeTool === 'shape'
-                      ? 'crosshair'
-                      : activeTool === 'lasso'
-                      ? 'crosshair'
-                      : 'default',
-                },
+                Platform.OS === 'web' &&
+                  ({
+                    cursor:
+                      activeTool === 'eraser'
+                        ? 'crosshair'
+                        : activeTool === 'hand'
+                        ? isHandPanning
+                          ? 'grabbing'
+                          : 'grab'
+                        : activeTool === 'text'
+                        ? 'text'
+                        : activeTool === 'shape'
+                        ? 'crosshair'
+                        : activeTool === 'lasso'
+                        ? 'crosshair'
+                        : 'crosshair',
+                    userSelect: 'none',
+                    touchAction: activeTool === 'hand' ? 'pan-y pan-x' : 'none',
+                  } as any),
               ]}
-              {...panResponder.panHandlers}
+              {...(Platform.OS !== 'web' ? panResponder.panHandlers : {})}
               {...(Platform.OS === 'web'
                 ? ({
                     onMouseDown: handleWebMouseDown,
@@ -2733,9 +3573,12 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
               ))}
           </View>
         </ScrollView>
+          </>
+        )}
       </View>
 
-      {/* 3. 하단 플로팅 프로 툴박스 (Goodnotes & Notewise fragment_sketch_toolbox.xml) */}
+      {/* 3. 하단 플로팅 프로 툴박스 (편집/필기 주석 모드일 때만 표시) */}
+      {(!isPdfMode || pdfWorkspaceTab === 'annotate') && (
       <View style={styles.floatingToolboxContainer}>
         {/* 활성 도구별 보조 컨트롤 팝오버 */}
         {activeTool === 'shape' && (
@@ -2779,7 +3622,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
             <TouchableOpacity
               style={[styles.subShapeBtn, activeTool === 'fountain' && styles.subShapeBtnActive]}
               onPress={() => setActiveTool('fountain')}
-              {...(Platform.OS === 'web' ? ({ onClick: () => setActiveTool('fountain') } as any) : {})}
             >
               <PenTool size={13} color={activeTool === 'fountain' ? '#2563EB' : '#475569'} />
               <Text style={[styles.subShapeBtnText, activeTool === 'fountain' && styles.subShapeBtnTextActive]}>
@@ -2789,7 +3631,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
             <TouchableOpacity
               style={[styles.subShapeBtn, activeTool === 'pen' && styles.subShapeBtnActive]}
               onPress={() => setActiveTool('pen')}
-              {...(Platform.OS === 'web' ? ({ onClick: () => setActiveTool('pen') } as any) : {})}
             >
               <PenTool size={13} color={activeTool === 'pen' ? '#2563EB' : '#475569'} />
               <Text style={[styles.subShapeBtnText, activeTool === 'pen' && styles.subShapeBtnTextActive]}>
@@ -2799,7 +3640,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
             <TouchableOpacity
               style={[styles.subShapeBtn, activeTool === 'highlighter' && styles.subShapeBtnActive]}
               onPress={() => setActiveTool('highlighter')}
-              {...(Platform.OS === 'web' ? ({ onClick: () => setActiveTool('highlighter') } as any) : {})}
             >
               <Highlighter size={13} color={activeTool === 'highlighter' ? '#2563EB' : '#475569'} />
               <Text style={[styles.subShapeBtnText, activeTool === 'highlighter' && styles.subShapeBtnTextActive]}>
@@ -2820,28 +3660,48 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
                   return next;
                 });
               }}
-              {...(Platform.OS === 'web'
-                ? ({
-                    onClick: () => {
-                      setAutoSnapShape((prev) => {
-                        const next = !prev;
-                        setExportToastMessage(next ? '📐 스마트 도형 자동 보정 켜짐' : '📐 도형 자동 보정 꺼짐');
-                        setTimeout(() => setExportToastMessage(null), 1800);
-                        return next;
-                      });
-                    },
-                  } as any)
-                : {})}
             >
               <Sparkles size={12} color={autoSnapShape ? '#2563EB' : '#64748B'} />
               <Text style={[styles.autoSnapText, autoSnapShape && styles.autoSnapTextActive]}>
                 도형 보정 {autoSnapShape ? 'ON' : 'OFF'}
               </Text>
             </TouchableOpacity>
+
+            {/* 사각사각 필기음 ASMR 퀵 토글 (설정과 실시간 연동) */}
+            <TouchableOpacity
+              style={[styles.autoSnapBtn, writingSoundEnabled && styles.writingSoundQuickBtnActive]}
+              onPress={() => {
+                const next = !writingSoundEnabled;
+                setWritingSoundEnabled(next);
+                if (next) {
+                  playWritingSoundPreview();
+                } else {
+                  stopWritingScratch();
+                }
+                setExportToastMessage(
+                  next ? '✏️ 사각사각 필기 효과음 켜짐 (설정 연동)' : '🔇 필기 효과음 꺼짐'
+                );
+                setTimeout(() => setExportToastMessage(null), 1800);
+              }}
+            >
+              {writingSoundEnabled ? (
+                <Volume2 size={12} color="#059669" />
+              ) : (
+                <VolumeX size={12} color="#64748B" />
+              )}
+              <Text
+                style={[
+                  styles.autoSnapText,
+                  writingSoundEnabled && styles.writingSoundQuickTextActive,
+                ]}
+              >
+                필기음 {writingSoundEnabled ? 'ON' : 'OFF'}
+              </Text>
+            </TouchableOpacity>
           </View>
         )}
 
-        {activeTool === 'text' && (
+        {(activeTool === 'text' || selectedTextBoxId !== null) && (
           <View style={styles.subShapeToolbox}>
             <Type size={13} color="#2563EB" />
             <Text style={styles.subShapeLabel}>글자 크기:</Text>
@@ -2877,8 +3737,17 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
             })}
             <View style={{ width: 1, height: 16, backgroundColor: '#E2E8F0', marginHorizontal: 4 }} />
             <Text style={[styles.subShapeBtnText, { color: '#64748B' }]}>
-              {selectedTextBoxId ? '선택된 상자 크기 변경됨' : '캔버스 클릭 시 텍스트 상자 생성'}
+              {selectedTextBoxId ? '선택된 텍스트 상자' : '캔버스 클릭 시 텍스트 상자 생성'}
             </Text>
+            {selectedTextBoxId && (
+              <TouchableOpacity
+                style={[styles.subShapeBtn, { marginLeft: 4 }]}
+                onPress={() => setSelectedTextBoxId(null)}
+                {...(Platform.OS === 'web' ? ({ onClick: () => setSelectedTextBoxId(null) } as any) : {})}
+              >
+                <X size={13} color="#64748B" />
+              </TouchableOpacity>
+            )}
           </View>
         )}
 
@@ -3187,9 +4056,9 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
 
           <View style={styles.toolboxDivider} />
 
-          {/* Goodnotes / Notewise 시그니처 3-Thickness Slot Presets */}
+          {/* Goodnotes / Notewise 시그니처 Thickness Slot Presets */}
           <View style={styles.widthSelectorGroup}>
-            {(activeTool === 'highlighter' ? [12, 22, 36] : [2, 4, 8]).map((w) => (
+            {(activeTool === 'highlighter' ? [12, 22, 36] : [2, 3, 5, 8]).map((w) => (
               <TouchableOpacity
                 key={w}
                 style={[styles.widthCircle, strokeWidth === w && styles.widthCircleSelected]}
@@ -3216,8 +4085,34 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
               >
                 <View
                   style={{
-                    width: activeTool === 'highlighter' ? (w === 12 ? 7 : w === 22 ? 11 : 15) : (w === 2 ? 4 : w === 4 ? 7 : 11),
-                    height: activeTool === 'highlighter' ? (w === 12 ? 7 : w === 22 ? 11 : 15) : (w === 2 ? 4 : w === 4 ? 7 : 11),
+                    width:
+                      activeTool === 'highlighter'
+                        ? w === 12
+                          ? 7
+                          : w === 22
+                          ? 11
+                          : 15
+                        : w === 2
+                        ? 4
+                        : w === 3
+                        ? 6
+                        : w === 5
+                        ? 8
+                        : 11,
+                    height:
+                      activeTool === 'highlighter'
+                        ? w === 12
+                          ? 7
+                          : w === 22
+                          ? 11
+                          : 15
+                        : w === 2
+                        ? 4
+                        : w === 3
+                        ? 6
+                        : w === 5
+                        ? 8
+                        : 11,
                     borderRadius: 8,
                     backgroundColor: strokeWidth === w ? '#2563EB' : '#64748B',
                   }}
@@ -3277,6 +4172,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           </View>
         )}
       </View>
+      )}
 
       {/* 4. 공유 및 내보내기 팝업 모달 (Goodnotes & Notewise 내보내기 1:1) */}
       <Modal
@@ -4058,7 +4954,8 @@ const styles = StyleSheet.create({
   },
   canvasScrollContent: {
     alignItems: 'center',
-    paddingVertical: 24,
+    paddingTop: 24,
+    paddingBottom: 140,
     paddingHorizontal: 16,
   },
   a4PageSheet: {
@@ -5199,6 +6096,104 @@ const styles = StyleSheet.create({
   },
   audioDockScroll: {
     maxHeight: 280,
+  },
+  // Adobe Acrobat 스타일 PDF 4대 모드 바 (편집/주석 | 페이지 구성 | 병합 | 분할)
+  acrobatModeBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 8,
+    backgroundColor: '#F8FAFC',
+    borderBottomWidth: 1,
+    borderBottomColor: '#E2E8F0',
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    zIndex: 9,
+  },
+  acrobatTabGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  acrobatTabBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 11,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    ...Platform.select({
+      web: { cursor: 'pointer' },
+    }),
+  },
+  acrobatTabBtnActiveBlue: {
+    backgroundColor: '#EFF6FF',
+    borderColor: '#2563EB',
+  },
+  acrobatTabBtnActiveGreen: {
+    backgroundColor: '#ECFDF5',
+    borderColor: '#059669',
+  },
+  acrobatTabBtnActivePurple: {
+    backgroundColor: '#F5F3FF',
+    borderColor: '#7C3AED',
+  },
+  acrobatTabBtnActiveRed: {
+    backgroundColor: '#FEF2F2',
+    borderColor: '#DC2626',
+  },
+  acrobatTabText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#475569',
+  },
+  acrobatTabTextActiveBlue: {
+    color: '#1D4ED8',
+    fontWeight: '700',
+  },
+  acrobatTabTextActiveGreen: {
+    color: '#047857',
+    fontWeight: '700',
+  },
+  acrobatTabTextActivePurple: {
+    color: '#6D28D9',
+    fontWeight: '700',
+  },
+  acrobatTabTextActiveRed: {
+    color: '#B91C1C',
+    fontWeight: '700',
+  },
+  acrobatOpenHubBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    ...Platform.select({
+      web: { cursor: 'pointer' },
+    }),
+  },
+  acrobatOpenHubText: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    color: '#2563EB',
+  },
+  writingSoundQuickBtnActive: {
+    backgroundColor: '#ECFDF5',
+    borderColor: '#10B981',
+  },
+  writingSoundQuickTextActive: {
+    color: '#059669',
+    fontWeight: '700',
   },
 });
 

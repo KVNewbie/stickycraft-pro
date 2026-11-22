@@ -82,7 +82,9 @@ export const AlarmAlertModal: React.FC<AlarmAlertModalProps> = ({
               {note.title || '제목 없는 메모'}
             </Text>
             <Text style={[styles.noteSnippet, { color: colorCfg.text }]} numberOfLines={3}>
-              {note.content || (note.checklist ? note.checklist.map((c) => `• ${c.text}`).join('\n') : '내용 없음')}
+              {note.isLocked
+                ? '🔒 비밀번호로 보호된 메모입니다.'
+                : note.content || (note.checklist ? note.checklist.map((c) => `• ${c.text}`).join('\n') : '내용 없음')}
             </Text>
           </View>
 

@@ -33,6 +33,159 @@ const STORAGE_KEY_LAYOUT = '@stickycraft_layout_v1';
 const STORAGE_KEY_LUNAR = '@stickycraft_lunar_mode_v1';
 const STORAGE_KEY_CALENDAR_STICKERS = '@stickycraft_calendar_stickers_v1';
 const STORAGE_KEY_AUTOBACKUP_ENABLED = '@stickycraft_autobackup_enabled_v1';
+const STORAGE_KEY_WRITING_SOUND = '@stickycraft_writing_sound_v1';
+
+// 2D 캔버스에서 메모끼리 서로 겹치지 않고 자기 자리를 지키도록 하는 정밀 AABB 충돌 방지 좌표 탐색 엔진
+const CARD_WIDTH = 280;
+const CARD_GAP_X = 28;
+const CARD_GAP_Y = 28;
+const GRID_STEP_X = 320;
+const GRID_STEP_Y = 560;
+
+export function estimateNoteCardHeight(note?: Partial<Note> | null): number {
+  if (!note) return 380;
+  let h = 195; // 드래그 핸들 바 + 상단 툴바 + 제목 + 하단 여백
+
+  const isPdf =
+    note.noteType === 'pdf' ||
+    !!note.pdfUri ||
+    (note.pdfPages && note.pdfPages.length > 0) ||
+    !!note.title?.toLowerCase?.().includes('.pdf');
+  if (isPdf) {
+    h += 215;
+  } else if (note.noteType === 'canvas' || (note.strokes && note.strokes.length > 0) || note.freeDrawingData) {
+    h += 185;
+  }
+
+  const audioCount = note.audioNotes?.length || 0;
+  if (audioCount > 0) {
+    h += Math.min(2, audioCount) * 108;
+  }
+
+  const imgCount = note.images?.length || 0;
+  if (imgCount > 0) {
+    h += 165;
+  }
+
+  const checkCount = note.checklist?.length || 0;
+  if (checkCount > 0) {
+    h += Math.min(220, 44 + checkCount * 30);
+  }
+
+  if (!isPdf && note.content) {
+    const lineEst = Math.ceil(note.content.length / 26) + (note.content.match(/\n/g)?.length || 0);
+    h += Math.min(210, Math.max(40, lineEst * 18));
+  }
+
+  if (note.tags && note.tags.length > 0) {
+    h += 32;
+  }
+
+  return Math.max(240, Math.min(560, h));
+}
+
+export function findNonOverlappingPosition(
+  desiredX: number,
+  desiredY: number,
+  existingNotes: Note[],
+  excludeId?: string,
+  activeBoardId: string = 'all',
+  targetNote?: Partial<Note> | null
+): { x: number; y: number } {
+  const clampedX = Math.max(20, Math.min(2260, Math.round(desiredX)));
+  const clampedY = Math.max(20, Math.min(2200, Math.round(desiredY)));
+
+  const resolvedTarget = targetNote || (excludeId ? existingNotes.find((n) => n.id === excludeId) : null);
+  const myHeight = estimateNoteCardHeight(resolvedTarget);
+
+  const peers = existingNotes
+    .filter((n) => {
+      if (n.isDeleted || n.isArchived) return false;
+      if (excludeId && n.id === excludeId) return false;
+      if (activeBoardId !== 'all' && n.boardId !== activeBoardId) return false;
+      return true;
+    })
+    .map((p) => ({
+      x: p.canvasX ?? 40,
+      y: p.canvasY ?? 40,
+      w: CARD_WIDTH,
+      h: estimateNoteCardHeight(p),
+    }));
+
+  const hasCollision = (cx: number, cy: number) => {
+    return peers.some((p) => {
+      const overlapX = cx < p.x + p.w + CARD_GAP_X && cx + CARD_WIDTH + CARD_GAP_X > p.x;
+      const overlapY = cy < p.y + p.h + CARD_GAP_Y && cy + myHeight + CARD_GAP_Y > p.y;
+      return overlapX && overlapY;
+    });
+  };
+
+  if (!hasCollision(clampedX, clampedY)) {
+    return { x: clampedX, y: clampedY };
+  }
+
+  // 1차: 충돌하는 피어의 바로 오른쪽/왼쪽/아래/위 등 밀어내기 후보 + 8방향 인접 슬롯 중 가장 가까운 빈 자리 탐색
+  const candidates: Array<{ x: number; y: number }> = [];
+  for (const p of peers) {
+    const overlapX = clampedX < p.x + p.w + CARD_GAP_X && clampedX + CARD_WIDTH + CARD_GAP_X > p.x;
+    const overlapY = clampedY < p.y + p.h + CARD_GAP_Y && clampedY + myHeight + CARD_GAP_Y > p.y;
+    if (overlapX && overlapY) {
+      candidates.push(
+        { x: p.x + p.w + CARD_GAP_X, y: clampedY },
+        { x: p.x - CARD_WIDTH - CARD_GAP_X, y: clampedY },
+        { x: clampedX, y: p.y + p.h + CARD_GAP_Y },
+        { x: clampedX, y: p.y - myHeight - CARD_GAP_Y }
+      );
+    }
+  }
+
+  const nearbyOffsets = [
+    { dx: GRID_STEP_X, dy: 0 },
+    { dx: -GRID_STEP_X, dy: 0 },
+    { dx: 0, dy: myHeight + CARD_GAP_Y },
+    { dx: 0, dy: -(myHeight + CARD_GAP_Y) },
+    { dx: 0, dy: GRID_STEP_Y },
+    { dx: GRID_STEP_X, dy: GRID_STEP_Y },
+    { dx: -GRID_STEP_X, dy: GRID_STEP_Y },
+    { dx: GRID_STEP_X, dy: -GRID_STEP_Y },
+    { dx: -GRID_STEP_X, dy: -GRID_STEP_Y },
+  ];
+  for (const off of nearbyOffsets) {
+    candidates.push({ x: clampedX + off.dx, y: clampedY + off.dy });
+  }
+
+  let bestCandidate: { x: number; y: number } | null = null;
+  let bestDist = Infinity;
+
+  for (const c of candidates) {
+    const tx = Math.max(20, Math.min(2260, Math.round(c.x)));
+    const ty = Math.max(20, Math.min(2200, Math.round(c.y)));
+    if (!hasCollision(tx, ty)) {
+      const dist = Math.hypot(tx - clampedX, ty - clampedY);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestCandidate = { x: tx, y: ty };
+      }
+    }
+  }
+
+  if (bestCandidate) {
+    return bestCandidate;
+  }
+
+  // 2차: 4열 정규 그리드 슬롯 순차 탐색
+  for (let row = 0; row < 20; row++) {
+    for (let col = 0; col < 4; col++) {
+      const gx = 40 + col * GRID_STEP_X;
+      const gy = 40 + row * GRID_STEP_Y;
+      if (!hasCollision(gx, gy)) {
+        return { x: gx, y: gy };
+      }
+    }
+  }
+
+  return { x: clampedX, y: clampedY };
+}
 
 interface NoteState {
   notes: Note[];
@@ -101,9 +254,11 @@ interface NoteState {
   calendarDateStickers: Record<string, { emoji: string; label?: string }>;
   setCalendarDateSticker: (dateStr: string, sticker?: { emoji: string; label?: string }) => void;
 
-  // ColorNote 기능 9: 자동 백업 옵션
+  // ColorNote 기능 9: 자동 백업 옵션 및 필기 사각사각 사운드 설정
   autoBackupEnabled: boolean;
   setAutoBackupEnabled: (enabled: boolean) => void;
+  writingSoundEnabled: boolean;
+  setWritingSoundEnabled: (enabled: boolean) => void;
 
   // ColorNote 기능 10: 실시간 알람 상태 & 스누즈/해제
   activeAlarmNote: Note | null;
@@ -114,7 +269,7 @@ interface NoteState {
 
   // Actions
   loadInitialData: () => Promise<void>;
-  addNote: (data: Omit<Note, 'id' | 'createdAt' | 'updatedAt' | 'zIndex' | 'canvasX' | 'canvasY' | 'rotation'>) => void;
+  addNote: (data: Omit<Note, 'id' | 'createdAt' | 'updatedAt' | 'zIndex' | 'canvasX' | 'canvasY' | 'rotation'>) => string;
   updateNote: (id: string, data: Partial<Note>) => void;
   duplicateNote: (id: string) => void;
   togglePin: (id: string) => void;
@@ -149,13 +304,17 @@ interface NoteState {
   activeEditorType: 'text' | 'checklist' | 'canvas' | 'pdf' | null;
   isCreateNoteSheetOpen: boolean;
   selectedNoteForDedicatedEditor: Note | null;
+  autoStartVoiceRecording: boolean;
+  pendingCalendarDate: string | null;
+  setPendingCalendarDate: (date: string | null) => void;
   openCreateNoteSheet: () => void;
   closeCreateNoteSheet: () => void;
-  openColorNoteTextEditor: (note?: Note | null) => void;
+  openColorNoteTextEditor: (note?: Note | null, autoRecord?: boolean) => void;
   openColorNoteChecklistEditor: (note?: Note | null) => void;
   openCanvasWorkspace: (note?: Note | null) => void;
   openPdfWorkspace: (note?: Note | null) => void;
   closeDedicatedEditor: () => void;
+  arrangeCanvasNotes: () => void;
 
   // Modals
   openNewNoteEditor: (initialMode?: EditorMode | any, initialTabType?: EditorTab['type']) => void;
@@ -255,6 +414,11 @@ export const useNoteStore = create<NoteState>((set, get) => ({
     set({ autoBackupEnabled: enabled });
     AsyncStorage.setItem(STORAGE_KEY_AUTOBACKUP_ENABLED, String(enabled)).catch(console.error);
   },
+  writingSoundEnabled: true,
+  setWritingSoundEnabled: (enabled) => {
+    set({ writingSoundEnabled: enabled });
+    AsyncStorage.setItem(STORAGE_KEY_WRITING_SOUND, String(enabled)).catch(console.error);
+  },
   activeAlarmNote: null,
   setActiveAlarmNote: (note) => set({ activeAlarmNote: note }),
   checkPendingAlarms: () => {
@@ -311,14 +475,19 @@ export const useNoteStore = create<NoteState>((set, get) => ({
   activeEditorType: null,
   isCreateNoteSheetOpen: false,
   selectedNoteForDedicatedEditor: null,
+  autoStartVoiceRecording: false,
+  pendingCalendarDate: null,
+
+  setPendingCalendarDate: (date) => set({ pendingCalendarDate: date }),
 
   openCreateNoteSheet: () => set({ isCreateNoteSheetOpen: true }),
   closeCreateNoteSheet: () => set({ isCreateNoteSheetOpen: false }),
 
-  openColorNoteTextEditor: (note = null) =>
+  openColorNoteTextEditor: (note = null, autoRecord = false) =>
     set({
       activeEditorType: 'text',
       selectedNoteForDedicatedEditor: note,
+      autoStartVoiceRecording: autoRecord,
       isCreateNoteSheetOpen: false,
     }),
 
@@ -326,6 +495,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
     set({
       activeEditorType: 'checklist',
       selectedNoteForDedicatedEditor: note,
+      autoStartVoiceRecording: false,
       isCreateNoteSheetOpen: false,
     }),
 
@@ -333,6 +503,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
     set({
       activeEditorType: 'canvas',
       selectedNoteForDedicatedEditor: note,
+      autoStartVoiceRecording: false,
       isCreateNoteSheetOpen: false,
     }),
 
@@ -340,6 +511,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
     set({
       activeEditorType: 'pdf',
       selectedNoteForDedicatedEditor: note,
+      autoStartVoiceRecording: false,
       isCreateNoteSheetOpen: false,
     }),
 
@@ -347,6 +519,8 @@ export const useNoteStore = create<NoteState>((set, get) => ({
     set({
       activeEditorType: null,
       selectedNoteForDedicatedEditor: null,
+      autoStartVoiceRecording: false,
+      pendingCalendarDate: null,
     }),
 
   // 탭 및 모드 시스템
@@ -373,6 +547,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
         savedLunar,
         savedStickers,
         savedAutoBackupEnabled,
+        savedWritingSound,
       ] = await Promise.all([
         AsyncStorage.getItem(STORAGE_KEY_NOTES),
         AsyncStorage.getItem(STORAGE_KEY_BOARDS),
@@ -385,6 +560,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
         AsyncStorage.getItem(STORAGE_KEY_LUNAR),
         AsyncStorage.getItem(STORAGE_KEY_CALENDAR_STICKERS),
         AsyncStorage.getItem(STORAGE_KEY_AUTOBACKUP_ENABLED),
+        AsyncStorage.getItem(STORAGE_KEY_WRITING_SOUND),
       ]);
 
       let finalNotes = INITIAL_MOCK_NOTES;
@@ -399,41 +575,60 @@ export const useNoteStore = create<NoteState>((set, get) => ({
         }
       }
 
-      // 오디오 메모 스마트 정규화: 기존 데이터에 제목이나 페이지가 누락된 경우 자동 보정
-      let hasMigratedAudios = false;
+      // 오디오 메모 스마트 정규화 및 2D 캔버스 겹침 자동 해소
+      let hasMigratedNotes = false;
+      const placedNotes: Note[] = [];
       finalNotes = finalNotes.map((n) => {
-        if (!n.audioNotes || n.audioNotes.length === 0) return n;
-        const isPdf =
-          n.noteType === 'pdf' ||
-          Boolean(n.pdfName) ||
-          Boolean(n.pdfUri) ||
-          Boolean(n.title?.toLowerCase().includes('.pdf'));
+        let noteCopy = { ...n };
+        if (noteCopy.audioNotes && noteCopy.audioNotes.length > 0) {
+          const isPdf =
+            noteCopy.noteType === 'pdf' ||
+            Boolean(noteCopy.pdfName) ||
+            Boolean(noteCopy.pdfUri) ||
+            Boolean(noteCopy.title?.toLowerCase().includes('.pdf'));
 
-        const updatedAudios = n.audioNotes.map((a, idx) => {
-          let updated = { ...a };
-          let changed = false;
-          // 1. PDF 문서인 경우 pageIndex 기본값 1 보장
-          if (isPdf && updated.pageIndex === undefined) {
-            updated.pageIndex = 1;
-            changed = true;
-          }
-          // 2. 제목이 누락되었거나 generic "음성 메모"인 경우 자동 부여
-          if (!updated.title || updated.title.trim() === '' || updated.title === '음성 메모') {
-            if (updated.pageIndex !== undefined) {
-              updated.title = `P.${updated.pageIndex} 음성 메모${n.audioNotes!.length > 1 ? ` #${idx + 1}` : ''}`;
-            } else {
-              updated.title = `녹음 ${idx + 1}`;
+          const updatedAudios = noteCopy.audioNotes.map((a, idx) => {
+            let updated = { ...a };
+            let changed = false;
+            if (isPdf && updated.pageIndex === undefined) {
+              updated.pageIndex = 1;
+              changed = true;
             }
-            changed = true;
-          }
-          if (changed) hasMigratedAudios = true;
-          return updated;
-        });
+            if (!updated.title || updated.title.trim() === '' || updated.title === '음성 메모') {
+              if (updated.pageIndex !== undefined) {
+                updated.title = `P.${updated.pageIndex} 음성 메모${noteCopy.audioNotes!.length > 1 ? ` #${idx + 1}` : ''}`;
+              } else {
+                updated.title = `녹음 ${idx + 1}`;
+              }
+              changed = true;
+            }
+            if (changed) hasMigratedNotes = true;
+            return updated;
+          });
+          noteCopy.audioNotes = updatedAudios;
+        }
 
-        return { ...n, audioNotes: updatedAudios };
+        // 캔버스에서 다른 메모와 겹쳐 있으면 자동으로 빈 슬롯으로 정렬
+        if (!noteCopy.isDeleted && !noteCopy.isArchived) {
+          const pos = findNonOverlappingPosition(
+            noteCopy.canvasX ?? 40,
+            noteCopy.canvasY ?? 40,
+            placedNotes,
+            noteCopy.id,
+            'all',
+            noteCopy
+          );
+          if (pos.x !== noteCopy.canvasX || pos.y !== noteCopy.canvasY) {
+            noteCopy.canvasX = pos.x;
+            noteCopy.canvasY = pos.y;
+            hasMigratedNotes = true;
+          }
+        }
+        placedNotes.push(noteCopy);
+        return noteCopy;
       });
 
-      if (hasMigratedAudios) {
+      if (hasMigratedNotes) {
         AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(finalNotes)).catch(() => {});
       }
 
@@ -483,6 +678,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
       const finalLayout = (savedLayout === 'list' ? 'list' : 'grid') as 'grid' | 'list';
       const finalLunar = (savedLunar as LunarDisplayMode) || 'all';
       const finalAutoBackup = savedAutoBackupEnabled !== 'false';
+      const finalWritingSound = savedWritingSound !== 'false';
 
       set({
         notes: finalNotes,
@@ -499,6 +695,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
         lunarDisplayMode: finalLunar,
         calendarDateStickers: parsedStickers,
         autoBackupEnabled: finalAutoBackup,
+        writingSoundEnabled: finalWritingSound,
         isLoading: false,
       });
 
@@ -561,13 +758,38 @@ export const useNoteStore = create<NoteState>((set, get) => ({
   },
   toggleNoteLock: (id, pin) => {
     const state = get();
+    const target = state.notes.find((n) => n.id === id);
+    if (!target) return;
+    const willBeLocked = !target.isLocked;
+    if (willBeLocked && !state.masterPin && !pin && !target.lockPin) {
+      set({
+        isLockModalOpen: true,
+        lockTargetNote: target,
+        lockCallback: () => {
+          const latestState = get();
+          const updated = latestState.notes.map((n) =>
+            n.id === id
+              ? {
+                  ...n,
+                  isLocked: true,
+                  lockPin: latestState.masterPin || undefined,
+                  updatedAt: Date.now(),
+                }
+              : n
+          );
+          set({ notes: updated });
+          AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updated)).catch(console.error);
+        },
+      });
+      return;
+    }
+
     const updatedNotes = state.notes.map((note) => {
       if (note.id !== id) return note;
-      const willBeLocked = !note.isLocked;
       return {
         ...note,
         isLocked: willBeLocked,
-        lockPin: willBeLocked ? (pin || state.masterPin || undefined) : undefined,
+        lockPin: willBeLocked ? (pin || state.masterPin || note.lockPin || undefined) : undefined,
         updatedAt: Date.now(),
       };
     });
@@ -695,18 +917,39 @@ export const useNoteStore = create<NoteState>((set, get) => ({
     const state = get();
     const newNoteId = 'note_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
     const maxZ = state.notes.reduce((max, n) => Math.max(max, n.zIndex || 0), 0);
-    const randomRotation = Number((Math.random() * 4 - 2).toFixed(1)); // -2도 ~ +2도 자연스러운 회전
-    
-    // 캔버스 초기 배치 좌표
-    const defaultX = 20 + ((state.notes.length * 40) % 200);
-    const defaultY = 40 + ((state.notes.length * 50) % 300);
+    const randomRotation = Number((Math.random() * 1.6 - 0.8).toFixed(1));
+
+    // 현재 선택된 보드가 있으면 우선 귀속 ('all'인 경우 전달된 boardId 또는 'ideas' 사용)
+    const resolvedBoardId =
+      state.activeBoardId && state.activeBoardId !== 'all'
+        ? state.activeBoardId
+        : data.boardId && data.boardId !== 'all'
+        ? data.boardId
+        : 'ideas';
+
+    // 기존 메모들과 겹치지 않는 첫 번째 빈 슬롯 탐색
+    const safePos = findNonOverlappingPosition(40, 40, state.notes, newNoteId, state.activeBoardId, data);
+
+    // 달력 뷰에서 특정 날짜를 선택하고 작성한 경우 해당 날짜로 일정 자동 연동
+    const targetCalendarDate =
+      state.pendingCalendarDate || (state.viewMode === 'calendar' ? state.selectedCalendarDate : null);
+    const resolvedReminder =
+      data.reminder ||
+      (targetCalendarDate
+        ? {
+            date: targetCalendarDate,
+            isCompleted: false,
+            repeat: 'none',
+          }
+        : undefined);
 
     const newNote: Note = {
       ...data,
       id: newNoteId,
-      boardId: data.boardId || (state.activeBoardId === 'all' ? 'ideas' : state.activeBoardId),
-      canvasX: defaultX,
-      canvasY: defaultY,
+      boardId: resolvedBoardId,
+      reminder: resolvedReminder,
+      canvasX: safePos.x,
+      canvasY: safePos.y,
       zIndex: maxZ + 1,
       rotation: randomRotation,
       createdAt: Date.now(),
@@ -714,8 +957,18 @@ export const useNoteStore = create<NoteState>((set, get) => ({
     };
 
     const updatedNotes = [newNote, ...state.notes];
-    set({ notes: updatedNotes });
+    set({ notes: updatedNotes, pendingCalendarDate: null });
     AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+    if (state.autoBackupEnabled) {
+      saveAutoBackupSnapshot({
+        notes: updatedNotes,
+        boards: state.boards,
+        widgets: state.widgets,
+        masterPin: state.masterPin,
+        calendarStickers: state.calendarDateStickers,
+      });
+    }
+    return newNoteId;
   },
 
   updateNote: (id, data) => {
@@ -732,12 +985,20 @@ export const useNoteStore = create<NoteState>((set, get) => ({
     const target = state.notes.find((n) => n.id === id);
     if (!target) return;
     const maxZ = state.notes.reduce((max, n) => Math.max(max, n.zIndex || 0), 0);
+    const newId = 'note_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
+    const safePos = findNonOverlappingPosition(
+      (target.canvasX || 40) + 320,
+      target.canvasY || 40,
+      state.notes,
+      newId,
+      state.activeBoardId
+    );
     const newNote: Note = {
       ...target,
-      id: 'note_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
+      id: newId,
       title: target.title ? `${target.title} (사본)` : '사본 메모',
-      canvasX: (target.canvasX || 50) + 30,
-      canvasY: (target.canvasY || 50) + 30,
+      canvasX: safePos.x,
+      canvasY: safePos.y,
       zIndex: maxZ + 1,
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -774,9 +1035,42 @@ export const useNoteStore = create<NoteState>((set, get) => ({
 
   updateCanvasPosition: (id, x, y) => {
     const state = get();
+    // 다른 메모 위에 겹치게 놓으면 가장 가까운 빈 슬롯으로 자동 밀어내기(Snap-to-Free-Space)
+    const safePos = findNonOverlappingPosition(x, y, state.notes, id, state.activeBoardId);
     const updatedNotes = state.notes.map((note) =>
-      note.id === id ? { ...note, canvasX: x, canvasY: y } : note
+      note.id === id ? { ...note, canvasX: safePos.x, canvasY: safePos.y } : note
     );
+    set({ notes: updatedNotes });
+    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+  },
+
+  arrangeCanvasNotes: () => {
+    const state = get();
+    const colBottomY = [40, 40, 40, 40];
+    let idx = 0;
+    const updatedNotes = state.notes.map((note) => {
+      if (note.isDeleted || (note.isArchived && !state.filters.showArchived)) return note;
+      if (state.activeBoardId !== 'all' && note.boardId !== state.activeBoardId) return note;
+
+      // 가장 높이가 낮은 열에 배치하여 카드 길이가 달라도 절대 겹치지 않게 정돈 (Masonry Auto-Arrange)
+      let targetCol = 0;
+      for (let c = 1; c < colBottomY.length; c++) {
+        if (colBottomY[c] < colBottomY[targetCol]) {
+          targetCol = c;
+        }
+      }
+      const x = 40 + targetCol * GRID_STEP_X;
+      const y = colBottomY[targetCol];
+      colBottomY[targetCol] = y + estimateNoteCardHeight(note) + CARD_GAP_Y;
+      idx++;
+      return {
+        ...note,
+        canvasX: x,
+        canvasY: y,
+        rotation: 0,
+        zIndex: idx,
+      };
+    });
     set({ notes: updatedNotes });
     AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
   },

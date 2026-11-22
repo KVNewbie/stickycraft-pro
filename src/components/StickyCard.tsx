@@ -219,6 +219,7 @@ export const StickyCard: React.FC<StickyCardProps> = ({
     openWidgetModal,
     openLockModal,
     toggleNoteLock,
+    toggleArchiveNote,
     openReminderModal,
     deleteNote,
   } = useNoteStore();
@@ -266,14 +267,27 @@ export const StickyCard: React.FC<StickyCardProps> = ({
   const topImages = standardImages.filter((img) => !img.placement || img.placement === 'top');
   const inlineImages = standardImages.filter((img) => img.placement === 'inline' || img.placement === 'bottom');
 
-  // Goodnotes / Notewise 정품 규격 PDF 문서 판별 및 샘플 데이터 매칭
   const isPdfNote =
     note.noteType === 'pdf' ||
+    Boolean(note.pdfPages && note.pdfPages.length > 0) ||
     Boolean(note.pdfName) ||
     Boolean(note.pdfUri) ||
     Boolean(note.title?.toLowerCase().includes('.pdf'));
 
-  const pdfDoc = isPdfNote ? getSampleDocumentForNote(note.title, note.pdfName) : null;
+  const pdfDoc = isPdfNote
+    ? note.pdfPages && note.pdfPages.length > 0
+      ? {
+          id: note.id,
+          name: note.pdfName || note.title,
+          pages: note.pdfPages.map((p, idx) => ({
+            pageNumber: p.pageNumber || idx + 1,
+            title: p.title,
+            subtitle: p.subtitle || (p.sourcePdfName ? `원본: ${p.sourcePdfName}` : ''),
+            content: p.content,
+          })),
+        }
+      : getSampleDocumentForNote(note.title, note.pdfName)
+    : null;
 
   return (
     <View
@@ -312,8 +326,8 @@ export const StickyCard: React.FC<StickyCardProps> = ({
           },
         ]}
       >
-        {/* Noteshelf 페이퍼 속지 템플릿 패턴 */}
-        <PaperTemplatePattern template={note.paperTemplate} />
+        {/* Noteshelf 페이퍼 속지 템플릿 패턴 (줄간격 동기화) */}
+        <PaperTemplatePattern template={note.paperTemplate} lineSpacing={dynamicLineHeight} />
 
         {/* Card Header (ColorNote Pro Actions) */}
         <View style={styles.header}>
@@ -406,6 +420,18 @@ export const StickyCard: React.FC<StickyCardProps> = ({
               style={styles.headerActionBtn}
             >
               <Ionicons name="share-outline" size={13} color={colorConfig.textMuted} />
+            </TouchableOpacity>
+
+            {/* ColorNote 보관함 이동 (Archive) */}
+            <TouchableOpacity
+              onPress={(e) => {
+                e.stopPropagation();
+                toggleArchiveNote(note.id);
+              }}
+              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+              style={styles.headerActionBtn}
+            >
+              <Ionicons name="archive-outline" size={13} color={colorConfig.textMuted} />
             </TouchableOpacity>
 
             {/* ColorNote 휴지통으로 이동 (안전 삭제) */}
@@ -993,7 +1019,11 @@ export const StickyCard: React.FC<StickyCardProps> = ({
                       <Text
                         style={[
                           styles.checkItemText,
-                          { color: colorConfig.text },
+                          {
+                            color: colorConfig.text,
+                            fontSize: dynamicFontSize,
+                            lineHeight: Math.round(dynamicFontSize * 1.4),
+                          },
                           item.completed && [
                             styles.checkItemCompleted,
                             { color: colorConfig.textMuted, textDecorationLine: 'line-through' },

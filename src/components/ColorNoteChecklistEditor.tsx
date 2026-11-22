@@ -32,8 +32,12 @@ import {
   Copy,
   Search,
   Bell,
+  Type,
+  Archive,
+  Folder,
+  Tag,
 } from 'lucide-react-native';
-import { Note, NoteColorId, ChecklistItem, AudioNote } from '../types/note';
+import { Note, NoteColorId, ChecklistItem, AudioNote, NoteFontSize } from '../types/note';
 import { NOTE_COLORS, COLOR_KEYS } from '../constants/colors';
 import { useNoteStore } from '../store/useNoteStore';
 import { AudioRecordingStudio } from './AudioRecordingStudio';
@@ -44,23 +48,46 @@ interface ColorNoteChecklistEditorProps {
   onClose: () => void;
 }
 
+const CHECKLIST_FONT_SIZES: { key: NoteFontSize; label: string; size: number }[] = [
+  { key: 'sm', label: '소', size: 13 },
+  { key: 'base', label: '보통', size: 15.5 },
+  { key: 'lg', label: '크게', size: 18.5 },
+  { key: 'xl', label: '특대', size: 22 },
+];
+
 export const ColorNoteChecklistEditor: React.FC<ColorNoteChecklistEditorProps> = ({
   note: initialNote,
   onClose,
 }) => {
   const {
+    notes,
+    boards,
+    activeBoardId,
     addNote,
     updateNote,
     deleteNote,
-    openLockModal,
+    toggleNoteLock,
+    toggleArchiveNote,
     openReminderModal,
   } = useNoteStore();
 
-  const [noteId, setNoteId] = useState<string>(initialNote?.id || '');
+  const [noteId] = useState<string>(initialNote?.id || '');
+  const liveNote = notes.find((n) => n.id === noteId) || initialNote || null;
+
   const [title, setTitle] = useState<string>(initialNote?.title || '');
   const [color, setColor] = useState<NoteColorId>(initialNote?.color || 'mint');
   const [isPinned, setIsPinned] = useState<boolean>(initialNote?.isPinned || false);
   const [isLocked, setIsLocked] = useState<boolean>(initialNote?.isLocked || false);
+  const [fontSize, setFontSize] = useState<NoteFontSize>(initialNote?.fontSize || 'base');
+  const [boardId, setBoardId] = useState<string>(
+    initialNote?.boardId || (activeBoardId !== 'all' ? activeBoardId : 'todo')
+  );
+  const [tags, setTags] = useState<string[]>(
+    initialNote?.tags && initialNote.tags.length > 0 ? initialNote.tags : ['체크리스트']
+  );
+  const [tagInput, setTagInput] = useState('');
+  const [isMetaOpen, setIsMetaOpen] = useState(false);
+
   const [items, setItems] = useState<ChecklistItem[]>(
     initialNote?.checklist && initialNote.checklist.length > 0
       ? initialNote.checklist
@@ -90,6 +117,32 @@ export const ColorNoteChecklistEditor: React.FC<ColorNoteChecklistEditorProps> =
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 1800);
+  };
+
+  const currentFontConfig =
+    CHECKLIST_FONT_SIZES.find((f) => f.key === fontSize) || CHECKLIST_FONT_SIZES[1];
+
+  const handleCycleFontSize = () => {
+    const idx = CHECKLIST_FONT_SIZES.findIndex((f) => f.key === fontSize);
+    const next = CHECKLIST_FONT_SIZES[(idx + 1) % CHECKLIST_FONT_SIZES.length];
+    setFontSize(next.key);
+    if (noteId) {
+      updateNote(noteId, { fontSize: next.key });
+    }
+    showToast(`🔤 글자 크기: ${next.label} (${next.size}px)`);
+  };
+
+  const handleAddTag = () => {
+    const cleaned = tagInput.trim().replace(/^#/, '');
+    if (!cleaned) return;
+    if (!tags.includes(cleaned)) {
+      setTags((prev) => [...prev, cleaned]);
+    }
+    setTagInput('');
+  };
+
+  const handleRemoveTag = (tagToRemove: string) => {
+    setTags((prev) => prev.filter((t) => t !== tagToRemove));
   };
 
   const handleCopyChecklist = async () => {
@@ -135,22 +188,26 @@ export const ColorNoteChecklistEditor: React.FC<ColorNoteChecklistEditorProps> =
         color,
         isPinned,
         isLocked,
+        fontSize,
+        boardId,
+        tags,
         audioNotes,
         noteType: 'checklist',
       });
     } else {
       addNote({
         title: finalTitle,
-        content: items.map((i) => (i.completed ? `[x] ${i.text}` : `[ ] ${i.text}`)).join('\n'),
+        content: initialNote?.content || '',
         color,
         decoStyle: 'minimal',
         images: [],
         checklist: items,
-        tags: ['체크리스트'],
+        tags,
         isPinned,
         isLocked,
+        fontSize,
         audioNotes,
-        boardId: 'ideas',
+        boardId,
         noteType: 'checklist',
       });
     }
@@ -281,6 +338,7 @@ export const ColorNoteChecklistEditor: React.FC<ColorNoteChecklistEditorProps> =
             style={styles.headerIconButton}
             onPress={handleSaveAndExit}
             hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            {...(Platform.OS === 'web' ? ({ onClick: handleSaveAndExit } as any) : {})}
           >
             <ArrowLeft size={24} color="#1E293B" />
           </TouchableOpacity>
@@ -364,15 +422,15 @@ export const ColorNoteChecklistEditor: React.FC<ColorNoteChecklistEditorProps> =
               </View>
             </TouchableOpacity>
 
-            {/* ColorNote 알람 & 리마인더 버튼 */}
+            {/* ColorNote 알람 & 리마인더 버튼 (실시간 스토어 반영) */}
             <TouchableOpacity
               style={[
                 styles.headerIconButton,
-                initialNote?.reminder && { backgroundColor: '#FEE2E2', borderRadius: 8 },
+                liveNote?.reminder && { backgroundColor: '#FEE2E2', borderRadius: 8 },
               ]}
               onPress={() => {
-                if (initialNote) {
-                  openReminderModal(initialNote);
+                if (liveNote) {
+                  openReminderModal(liveNote);
                 } else {
                   showToast('체크리스트를 먼저 저장하신 후 알람을 설정하실 수 있습니다');
                 }
@@ -380,10 +438,42 @@ export const ColorNoteChecklistEditor: React.FC<ColorNoteChecklistEditorProps> =
             >
               <Bell
                 size={20}
-                color={initialNote?.reminder ? '#DC2626' : '#475569'}
-                fill={initialNote?.reminder?.pinToStatusBar ? '#DC2626' : 'none'}
+                color={liveNote?.reminder ? '#DC2626' : '#475569'}
+                fill={liveNote?.reminder?.pinToStatusBar ? '#DC2626' : 'none'}
               />
             </TouchableOpacity>
+
+            {/* 잠금 토글 버튼 */}
+            <TouchableOpacity
+              style={styles.headerIconButton}
+              onPress={() => {
+                if (noteId) {
+                  toggleNoteLock(noteId);
+                  setIsLocked(!isLocked);
+                } else {
+                  setIsLocked(!isLocked);
+                }
+              }}
+            >
+              {isLocked ? (
+                <Lock size={19} color="#EF4444" />
+              ) : (
+                <Unlock size={19} color="#64748B" />
+              )}
+            </TouchableOpacity>
+
+            {/* 보관함 이동 버튼 */}
+            {noteId ? (
+              <TouchableOpacity
+                style={styles.headerIconButton}
+                onPress={() => {
+                  toggleArchiveNote(noteId);
+                  onClose();
+                }}
+              >
+                <Archive size={19} color="#64748B" />
+              </TouchableOpacity>
+            ) : null}
 
             {/* 더보기 메뉴 버튼 */}
             <TouchableOpacity
@@ -394,6 +484,45 @@ export const ColorNoteChecklistEditor: React.FC<ColorNoteChecklistEditorProps> =
             </TouchableOpacity>
           </View>
         </View>
+
+        {/* 폴더(보드) & 태그 설정 패널 */}
+        {isMetaOpen && (
+          <View style={styles.metaConfigBar}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.metaBoardRow}>
+              <Folder size={13} color="#64748B" />
+              <Text style={styles.metaLabel}>폴더:</Text>
+              {boards
+                .filter((b) => b.id !== 'all')
+                .map((b) => (
+                  <TouchableOpacity
+                    key={b.id}
+                    style={[styles.metaChip, boardId === b.id && styles.metaChipActive]}
+                    onPress={() => setBoardId(b.id)}
+                  >
+                    <Text style={[styles.metaChipText, boardId === b.id && styles.metaChipTextActive]}>
+                      {b.name}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+            </ScrollView>
+            <View style={styles.metaTagInputRow}>
+              <Tag size={13} color="#64748B" />
+              <TextInput
+                style={styles.metaTagInput}
+                placeholder="태그 입력 후 Enter..."
+                placeholderTextColor="#94A3B8"
+                value={tagInput}
+                onChangeText={setTagInput}
+                onSubmitEditing={handleAddTag}
+              />
+              {tags.map((t) => (
+                <TouchableOpacity key={t} style={styles.tagPill} onPress={() => handleRemoveTag(t)}>
+                  <Text style={styles.tagPillText}>#{t} ×</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        )}
 
         {/* 체크리스트 내 실시간 검색 바 */}
         {isSearchOpen && (
@@ -519,7 +648,7 @@ export const ColorNoteChecklistEditor: React.FC<ColorNoteChecklistEditorProps> =
           </TouchableOpacity>
           <TextInput
             ref={addItemInputRef}
-            style={styles.addItemInput}
+            style={[styles.addItemInput, { fontSize: currentFontConfig.size }]}
             placeholder="+ 새 할 일 항목 입력 (Enter로 연속 추가)..."
             placeholderTextColor="#64748B"
             value={newItemText}
@@ -570,16 +699,16 @@ export const ColorNoteChecklistEditor: React.FC<ColorNoteChecklistEditorProps> =
                   )}
                 </TouchableOpacity>
 
-                {/* 항목 텍스트 입력창 (즉시 인라인 수정 가능) */}
+                {/* 항목 텍스트 입력창 (즉시 인라인 수정 가능, 1줄 밀도 최적화) */}
                 <TextInput
                   style={[
                     styles.itemTextInput,
+                    { fontSize: currentFontConfig.size },
                     item.completed && styles.itemTextCompleted,
                     isMatched && styles.itemTextMatched,
                   ]}
                   value={item.text}
                   onChangeText={(text) => updateItemText(item.id, text)}
-                  multiline
                 />
 
                 {/* 순서 조정, 복제 & 삭제 액션 */}
@@ -627,8 +756,19 @@ export const ColorNoteChecklistEditor: React.FC<ColorNoteChecklistEditorProps> =
           )}
         </ScrollView>
 
-        {/* 하단 툴바: 빠른 정리 액션 */}
+        {/* 하단 툴바: 빠른 정리 액션 & 폰트 크기 & 폴더/태그 */}
         <View style={styles.bottomToolbar}>
+          <TouchableOpacity style={styles.toolbarChip} onPress={handleCycleFontSize}>
+            <Type size={13} color="#334155" />
+            <Text style={styles.toolbarChipText}>크기: {currentFontConfig.label}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.toolbarChip, isMetaOpen && { backgroundColor: '#DBEAFE', borderColor: '#93C5FD' }]}
+            onPress={() => setIsMetaOpen(!isMetaOpen)}
+          >
+            <Folder size={13} color={isMetaOpen ? '#1D4ED8' : '#334155'} />
+            <Text style={[styles.toolbarChipText, isMetaOpen && { color: '#1D4ED8' }]}>폴더·태그</Text>
+          </TouchableOpacity>
           <TouchableOpacity style={styles.toolbarChip} onPress={sortCheckedToBottom}>
             <ArrowUpDown size={14} color="#334155" />
             <Text style={styles.toolbarChipText}>하단 정렬</Text>
@@ -719,6 +859,76 @@ const styles = StyleSheet.create({
   },
   activeIconBlue: {
     backgroundColor: '#DBEAFE',
+  },
+  metaConfigBar: {
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0,0,0,0.08)',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    gap: 8,
+  },
+  metaBoardRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  metaLabel: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    color: '#475569',
+    marginRight: 2,
+  },
+  metaChip: {
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  metaChipActive: {
+    backgroundColor: '#DBEAFE',
+    borderColor: '#3B82F6',
+  },
+  metaChipText: {
+    fontSize: 11.5,
+    fontWeight: '600',
+    color: '#475569',
+  },
+  metaChipTextActive: {
+    color: '#1D4ED8',
+    fontWeight: '700',
+  },
+  metaTagInputRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 6,
+  },
+  metaTagInput: {
+    minWidth: 140,
+    fontSize: 12.5,
+    color: '#1E293B',
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  tagPill: {
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+  },
+  tagPillText: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    color: '#334155',
   },
   inListSearchBar: {
     flexDirection: 'row',

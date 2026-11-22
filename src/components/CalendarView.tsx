@@ -33,8 +33,10 @@ export const CalendarView: React.FC = () => {
     notes,
     selectedCalendarDate,
     setSelectedCalendarDate,
+    setPendingCalendarDate,
     openEditNoteEditor,
     openNewNoteEditor,
+    openLockModal,
     toggleChecklistItem,
     lunarDisplayMode,
     setLunarDisplayMode,
@@ -59,15 +61,18 @@ export const CalendarView: React.FC = () => {
   // Filter out deleted notes
   const activeNotes = useMemo(() => notes.filter((n) => !n.isDeleted), [notes]);
 
-  // Map notes to YYYY-MM-DD based on updatedAt, createdAt, or reminder.date
-  const notesByDate = useMemo(() => {
-    const map: Record<string, Note[]> = {};
+  // Map notes to YYYY-MM-DD based on updatedAt, createdAt, or reminder.date (including repeat rules)
+  const getNotesForDate = useMemo(() => {
+    const exactMap: Record<string, Note[]> = {};
+    const repeatNotes: Note[] = [];
 
     activeNotes.forEach((note) => {
-      // Primary date: reminder date if exists, else updatedAt date
       let dateKey = '';
       if (note.reminder && note.reminder.date) {
         dateKey = note.reminder.date;
+        if (note.reminder.repeat && note.reminder.repeat !== 'none') {
+          repeatNotes.push(note);
+        }
       } else {
         const d = new Date(note.updatedAt || note.createdAt);
         const y = d.getFullYear();
@@ -76,13 +81,38 @@ export const CalendarView: React.FC = () => {
         dateKey = `${y}-${m}-${day}`;
       }
 
-      if (!map[dateKey]) {
-        map[dateKey] = [];
+      if (!exactMap[dateKey]) {
+        exactMap[dateKey] = [];
       }
-      map[dateKey].push(note);
+      exactMap[dateKey].push(note);
     });
 
-    return map;
+    return (targetDateStr: string): Note[] => {
+      const baseList = exactMap[targetDateStr] ? [...exactMap[targetDateStr]] : [];
+      if (repeatNotes.length === 0) return baseList;
+
+      const baseIds = new Set(baseList.map((n) => n.id));
+      for (const rNote of repeatNotes) {
+        if (baseIds.has(rNote.id) || !rNote.reminder?.date) continue;
+        const startStr = rNote.reminder.date;
+        if (targetDateStr <= startStr) continue;
+        const rep = rNote.reminder.repeat;
+        if (rep === 'daily') {
+          baseList.push(rNote);
+        } else if (rep === 'weekly') {
+          const [sy, sm, sd] = startStr.split('-').map(Number);
+          const [ty, tm, td] = targetDateStr.split('-').map(Number);
+          if (new Date(sy, sm - 1, sd).getDay() === new Date(ty, tm - 1, td).getDay()) {
+            baseList.push(rNote);
+          }
+        } else if (rep === 'monthly') {
+          if (startStr.slice(8, 10) === targetDateStr.slice(8, 10)) {
+            baseList.push(rNote);
+          }
+        }
+      }
+      return baseList;
+    };
   }, [activeNotes]);
 
   // Generate 42 calendar cells
@@ -112,7 +142,7 @@ export const CalendarView: React.FC = () => {
         month: prevM,
         isCurrentMonth: false,
         isToday: dateStr === todayStr,
-        notes: notesByDate[dateStr] || [],
+        notes: getNotesForDate(dateStr),
       });
     }
 
@@ -126,7 +156,7 @@ export const CalendarView: React.FC = () => {
         month: month + 1,
         isCurrentMonth: true,
         isToday: dateStr === todayStr,
-        notes: notesByDate[dateStr] || [],
+        notes: getNotesForDate(dateStr),
       });
     }
 
@@ -144,17 +174,17 @@ export const CalendarView: React.FC = () => {
         month: nextM,
         isCurrentMonth: false,
         isToday: dateStr === todayStr,
-        notes: notesByDate[dateStr] || [],
+        notes: getNotesForDate(dateStr),
       });
     }
 
     return cells;
-  }, [year, month, notesByDate]);
+  }, [year, month, getNotesForDate]);
 
   // Notes on currently selected date
   const selectedDateNotes = useMemo(() => {
-    return notesByDate[selectedCalendarDate] || [];
-  }, [notesByDate, selectedCalendarDate]);
+    return getNotesForDate(selectedCalendarDate);
+  }, [getNotesForDate, selectedCalendarDate]);
 
   // Selected date lunar info
   const selectedDateLunar = useMemo(() => {
@@ -351,7 +381,10 @@ export const CalendarView: React.FC = () => {
 
             <TouchableOpacity
               style={styles.addNoteForDateBtn}
-              onPress={() => openNewNoteEditor()}
+              onPress={() => {
+                setPendingCalendarDate(selectedCalendarDate);
+                openNewNoteEditor();
+              }}
               activeOpacity={0.8}
             >
               <Ionicons name="add" size={18} color="#FFF" />
@@ -410,7 +443,13 @@ export const CalendarView: React.FC = () => {
                       styles.noteListItem,
                       { backgroundColor: color.bg, borderColor: color.cardBorder },
                     ]}
-                    onPress={() => openEditNoteEditor(note)}
+                    onPress={() => {
+                      if (note.isLocked) {
+                        openLockModal(note, () => openEditNoteEditor(note));
+                      } else {
+                        openEditNoteEditor(note);
+                      }
+                    }}
                     activeOpacity={0.85}
                   >
                     <View style={styles.noteItemHeader}>
@@ -419,7 +458,7 @@ export const CalendarView: React.FC = () => {
                         style={[styles.noteItemTitle, { color: color.text }]}
                         numberOfLines={1}
                       >
-                        {note.title || '제목 없는 메모'}
+                        {note.isLocked ? '비밀번호로 보호된 메모' : note.title || '제목 없는 메모'}
                       </Text>
 
                       {note.isPinned && (
@@ -438,42 +477,50 @@ export const CalendarView: React.FC = () => {
                       )}
                     </View>
 
-                    {note.content ? (
-                      <Text
-                        style={[styles.noteItemBody, { color: color.text }]}
-                        numberOfLines={3}
-                      >
-                        {note.content}
+                    {note.isLocked ? (
+                      <Text style={[styles.noteItemBody, { color: color.textMuted, fontStyle: 'italic' }]}>
+                        🔒 비밀번호로 보호된 메모입니다. 탭하여 PIN을 입력하고 확인하세요.
                       </Text>
-                    ) : null}
-
-                    {/* Checklist preview */}
-                    {note.checklist && note.checklist.length > 0 && (
-                      <View style={styles.checklistPreview}>
-                        {note.checklist.slice(0, 3).map((item) => (
-                          <TouchableOpacity
-                            key={item.id}
-                            style={styles.checkItemRow}
-                            onPress={() => toggleChecklistItem(note.id, item.id)}
+                    ) : (
+                      <>
+                        {note.content ? (
+                          <Text
+                            style={[styles.noteItemBody, { color: color.text }]}
+                            numberOfLines={3}
                           >
-                            <Ionicons
-                              name={item.completed ? 'checkbox' : 'square-outline'}
-                              size={16}
-                              color={item.completed ? '#10B981' : '#64748B'}
-                            />
-                            <Text
-                              style={[
-                                styles.checkItemText,
-                                { color: color.text },
-                                item.completed && styles.checkItemCompleted,
-                              ]}
-                              numberOfLines={1}
-                            >
-                              {item.text}
-                            </Text>
-                          </TouchableOpacity>
-                        ))}
-                      </View>
+                            {note.content}
+                          </Text>
+                        ) : null}
+
+                        {/* Checklist preview */}
+                        {note.checklist && note.checklist.length > 0 && (
+                          <View style={styles.checklistPreview}>
+                            {note.checklist.slice(0, 3).map((item) => (
+                              <TouchableOpacity
+                                key={item.id}
+                                style={styles.checkItemRow}
+                                onPress={() => toggleChecklistItem(note.id, item.id)}
+                              >
+                                <Ionicons
+                                  name={item.completed ? 'checkbox' : 'square-outline'}
+                                  size={16}
+                                  color={item.completed ? '#10B981' : '#64748B'}
+                                />
+                                <Text
+                                  style={[
+                                    styles.checkItemText,
+                                    { color: color.text },
+                                    item.completed && styles.checkItemCompleted,
+                                  ]}
+                                  numberOfLines={1}
+                                >
+                                  {item.text}
+                                </Text>
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                        )}
+                      </>
                     )}
                   </TouchableOpacity>
                 );

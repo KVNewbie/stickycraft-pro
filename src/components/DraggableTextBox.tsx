@@ -124,6 +124,15 @@ export const DraggableTextBox: React.FC<DraggableTextBoxProps> = ({
     onUpdate(textBox.id, { fontSize: nextSize });
   };
 
+  const handleStepFontSize = (dir: -1 | 1) => {
+    const curIdx = FONT_SIZE_STEPS.indexOf(fontSize);
+    let nextIdx = curIdx >= 0 ? curIdx + dir : 1;
+    nextIdx = Math.max(0, Math.min(FONT_SIZE_STEPS.length - 1, nextIdx));
+    const nextSize = FONT_SIZE_STEPS[nextIdx];
+    setFontSize(nextSize);
+    onUpdate(textBox.id, { fontSize: nextSize });
+  };
+
   const handleCycleBgColor = () => {
     const nextBg =
       bgColor === 'transparent'
@@ -142,6 +151,10 @@ export const DraggableTextBox: React.FC<DraggableTextBoxProps> = ({
   };
 
   const TEXT_COLORS = ['#1E293B', '#2563EB', '#DC2626', '#059669', '#7C3AED', '#EA580C'];
+
+  const lineCount = Math.max(1, (text || '').split('\n').length);
+  const computedLineHeight = Math.round(fontSize * 1.38);
+  const computedMinHeight = Math.max(computedLineHeight + 12, lineCount * computedLineHeight + 12);
 
   return (
     <View
@@ -171,6 +184,15 @@ export const DraggableTextBox: React.FC<DraggableTextBoxProps> = ({
             <GripHorizontal size={14} color="#64748B" />
           </View>
 
+          {/* Font Size Step Down (A-) */}
+          <TouchableOpacity
+            style={styles.pillBtn}
+            onPress={() => handleStepFontSize(-1)}
+            {...(Platform.OS === 'web' ? ({ onClick: () => handleStepFontSize(-1) } as any) : {})}
+          >
+            <Text style={styles.pillBtnText}>A-</Text>
+          </TouchableOpacity>
+
           {/* Font Size Toggle */}
           <TouchableOpacity
             style={styles.pillBtn}
@@ -178,6 +200,15 @@ export const DraggableTextBox: React.FC<DraggableTextBoxProps> = ({
             {...(Platform.OS === 'web' ? ({ onClick: handleCycleFontSize } as any) : {})}
           >
             <Text style={styles.pillBtnText}>{fontSize}px</Text>
+          </TouchableOpacity>
+
+          {/* Font Size Step Up (A+) */}
+          <TouchableOpacity
+            style={styles.pillBtn}
+            onPress={() => handleStepFontSize(1)}
+            {...(Platform.OS === 'web' ? ({ onClick: () => handleStepFontSize(1) } as any) : {})}
+          >
+            <Text style={styles.pillBtnText}>A+</Text>
           </TouchableOpacity>
 
           {/* Color Picker Toggle */}
@@ -234,12 +265,13 @@ export const DraggableTextBox: React.FC<DraggableTextBoxProps> = ({
           {
             fontSize,
             color,
-            lineHeight: Math.round(fontSize * 1.35),
-            minHeight: Math.round(fontSize * 1.4),
+            lineHeight: computedLineHeight,
+            minHeight: computedMinHeight,
           },
         ]}
         value={text}
         onChangeText={handleTextChange}
+        onFocus={() => onSelect(textBox.id)}
         placeholder="텍스트 입력..."
         placeholderTextColor="#94A3B8"
         multiline

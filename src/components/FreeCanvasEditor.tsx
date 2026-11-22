@@ -19,6 +19,8 @@ import { PaperTemplate, FreeTextBox, NoteImage, AudioNote, FreeHandStroke } from
 import { AudioPlayerBar } from './AudioPlayerBar';
 import { X, Check, Move, Maximize2, Mic, Image as ImageIcon, Volume2 } from 'lucide-react-native';
 import { recognizeShape } from '../utils/shapeRecognizer';
+import { useNoteStore } from '../store/useNoteStore';
+import { triggerWritingScratch, stopWritingScratch } from '../utils/writingSound';
 
 export interface FreeCanvasEditorRef {
   undo: () => void;
@@ -93,6 +95,10 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
     ref
   ) => {
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
+    const writingSoundEnabled = useNoteStore((s) => s.writingSoundEnabled);
+    const writingSoundEnabledRef = useRef(writingSoundEnabled);
+    writingSoundEnabledRef.current = writingSoundEnabled;
+    const liveStrokeRef = useRef<Stroke | null>(null);
 
     const [strokes, setStrokes] = useState<Stroke[]>(initialStrokes as Stroke[]);
     const [redoStack, setRedoStack] = useState<Stroke[]>([]);
@@ -512,29 +518,59 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
                     tool: selectedTool,
                     isRuler: isRulerActive,
                   };
+                  liveStrokeRef.current = newStroke;
                   setCurrentStroke(newStroke);
                 }}
                 onPointerMove={(e: any) => {
-                  if (!currentStroke) return;
+                  const active = liveStrokeRef.current;
+                  if (!active) return;
                   const rect = e.currentTarget.getBoundingClientRect();
                   const x = e.clientX - rect.left;
                   const y = e.clientY - rect.top;
+                  const prevPt = active.points[active.points.length - 1];
+                  const dx = prevPt ? x - prevPt.x : 0;
+                  const dy = prevPt ? y - prevPt.y : 0;
+                  if (prevPt && Math.hypot(dx, dy) < 1.1) return;
 
-                  setCurrentStroke((prev) => {
-                    if (!prev) return null;
-                    return { ...prev, points: [...prev.points, { x, y }] };
-                  });
+                  active.points.push({ x, y });
+                  triggerWritingScratch(dx, dy, writingSoundEnabledRef.current, active.tool);
+
+                  // 즉시 HTML5 Canvas에 현재 세그먼트를 직접 드로잉 (리렌더링 지연 0ms)
+                  const canvas = canvasRef.current;
+                  const ctx = canvas?.getContext('2d');
+                  if (ctx && prevPt) {
+                    ctx.save();
+                    ctx.beginPath();
+                    ctx.moveTo(prevPt.x, prevPt.y);
+                    ctx.lineTo(x, y);
+                    if (active.tool === 'highlighter') {
+                      ctx.globalAlpha = 0.25;
+                      ctx.strokeStyle = active.color;
+                      ctx.lineWidth = active.width * 2.5;
+                      ctx.lineCap = 'round';
+                    } else {
+                      ctx.globalAlpha = 1.0;
+                      ctx.strokeStyle = active.color;
+                      ctx.lineWidth = active.tool === 'fountain' ? active.width * 1.3 : active.width;
+                      ctx.lineCap = 'round';
+                    }
+                    ctx.stroke();
+                    ctx.restore();
+                  }
                 }}
                 onPointerUp={() => {
-                  if (currentStroke && currentStroke.points.length > 1) {
-                    let finalStroke = currentStroke;
+                  stopWritingScratch();
+                  const active = liveStrokeRef.current;
+                  liveStrokeRef.current = null;
+                  if (active && active.points.length > 1) {
+                    let finalStroke = active;
 
                     // 스마트 도형 자동 인식 (한 번에 그린 단일 획만 변환)
                     if (selectedTool === 'shape' || isRulerActive) {
-                      const recognized = recognizeShape(currentStroke.points);
+                      const recognized = recognizeShape(active.points);
                       if (recognized) {
                         finalStroke = {
-                          ...currentStroke,
+                          ...active,
                           points: recognized.points,
                           isRuler: recognized.type === 'line',
                           shapeType: mapShapeType(recognized.type),
@@ -547,6 +583,19 @@ export const FreeCanvasEditor = forwardRef<FreeCanvasEditorRef, FreeCanvasEditor
                     setStrokes(updated);
                     setRedoStack([]);
                     if (onUpdateStrokes) onUpdateStrokes(updated as any);
+                  }
+                  setCurrentStroke(null);
+                }}
+                onPointerLeave={() => {
+                  stopWritingScratch();
+                  if (liveStrokeRef.current && liveStrokeRef.current.points.length > 1) {
+                    const updated = [...strokes, liveStrokeRef.current];
+                    liveStrokeRef.current = null;
+                    setStrokes(updated);
+                    setRedoStack([]);
+                    if (onUpdateStrokes) onUpdateStrokes(updated as any);
+                  } else {
+                    liveStrokeRef.current = null;
                   }
                   setCurrentStroke(null);
                 }}

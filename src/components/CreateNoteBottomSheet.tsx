@@ -44,8 +44,8 @@ export const CreateNoteBottomSheet: React.FC = () => {
     } else if (type === 'pdf') {
       openPdfWorkspace(null);
     } else if (type === 'voice') {
-      // 음성 메모는 텍스트 에디터에서 녹음기를 바로 띄우거나 전용 녹음 메모 생성
-      openColorNoteTextEditor(null);
+      // 음성 메모는 텍스트 에디터 진입과 동시에 녹음 스튜디오를 즉시 가동
+      openColorNoteTextEditor(null, true);
     }
   };
 
@@ -82,10 +82,10 @@ export const CreateNoteBottomSheet: React.FC = () => {
     },
     {
       id: 'pdf',
-      title: 'PDF / 학습 문서 열기',
-      badge: 'Goodnotes & Notewise',
+      title: 'PDF 문서 열기 · 병합 · 분할',
+      badge: 'Adobe Acrobat 스타일',
       badgeColor: '#E11D48',
-      desc: 'PDF 문서를 열어 형광펜 필기, 올가미 캡처, 주석 달기',
+      desc: '로컬 PDF 파일 열기, 필기 주석, 페이지 구성, PDF 병합(Merge) · 분할(Split)',
       icon: BookOpen,
       iconColor: '#E11D48',
       bgColor: '#FFF1F2',

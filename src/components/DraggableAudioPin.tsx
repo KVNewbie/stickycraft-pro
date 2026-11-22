@@ -68,7 +68,6 @@ export const DraggableAudioPin: React.FC<DraggableAudioPinProps> = ({
   const [duration, setDuration] = useState(audio.duration || 10);
   const [playbackSpeed, setPlaybackSpeed] = useState<1.0 | 1.25 | 1.5 | 2.0>(1.0);
   const [isMuted, setIsMuted] = useState(false);
-  const [animTick, setAnimTick] = useState(0);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const isHtmlAudioSupported = useRef(false);
@@ -150,7 +149,6 @@ export const DraggableAudioPin: React.FC<DraggableAudioPinProps> = ({
   // 재생 타이머 (실제 HTML5 오디오가 없거나 시뮬레이션일 때)
   useEffect(() => {
     let timer: any = null;
-    let animTimer: any = null;
 
     if (isPlaying) {
       if (!audioRef.current || !isHtmlAudioSupported.current) {
@@ -165,15 +163,10 @@ export const DraggableAudioPin: React.FC<DraggableAudioPinProps> = ({
           });
         }, intervalMs);
       }
-
-      animTimer = setInterval(() => {
-        setAnimTick((t) => (t + 1) % 6);
-      }, 150);
     }
 
     return () => {
       if (timer) clearInterval(timer);
-      if (animTimer) clearInterval(animTimer);
     };
   }, [isPlaying, duration, playbackSpeed]);
 
@@ -475,15 +468,13 @@ export const DraggableAudioPin: React.FC<DraggableAudioPinProps> = ({
                 const progressRatio = duration > 0 ? currentTime / duration : 0;
                 const activeBarIdx = Math.floor(progressRatio * PIN_WAVE_BARS_COUNT);
                 const isPast = idx <= activeBarIdx;
-                const isCurrent = idx === activeBarIdx && isPlaying;
-                const dynamicHeight = isCurrent ? Math.min(24, h + (animTick % 2 === 0 ? 4 : -2)) : h;
                 return (
                   <View
                     key={idx}
                     style={[
                       styles.waveBarItem,
                       {
-                        height: dynamicHeight,
+                        height: h,
                         backgroundColor: isPast ? '#2563EB' : '#CBD5E1',
                         opacity: isPast ? 1 : 0.65,
                       },

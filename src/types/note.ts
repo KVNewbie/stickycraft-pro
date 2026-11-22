@@ -141,6 +141,15 @@ export type SortOption = 'updated' | 'created' | 'title' | 'color' | 'reminder';
 
 export type LunarDisplayMode = 'none' | 'all' | 'key_days';
 
+export interface PdfPageData {
+  id: string;
+  pageNumber: number;
+  title: string;
+  subtitle?: string;
+  content: string;
+  sourcePdfName?: string;
+}
+
 export interface Note {
   id: string;
   title: string;
@@ -179,6 +188,7 @@ export interface Note {
   noteType?: 'text' | 'checklist' | 'canvas' | 'pdf'; // 메모 고유 유형
   pdfUri?: string; // 첨부된 PDF/문서 URI
   pdfName?: string; // 문서 파일명
+  pdfPages?: PdfPageData[]; // PDF 개별 페이지 데이터 (편집/병합/분할 지원)
   textBoxes?: FreeTextBox[]; // PDF 및 캔버스 자유 텍스트 상자
   bookmarkedPages?: number[]; // Jnotes, Notewise, Goodnotes 스타일 즐겨찾기/책갈피 페이지 번호 목록
   pageTemplates?: Record<number, PaperTemplate>; // 페이지별 개별 속지 템플릿 (줄노트, 모눈, 코넬 등)

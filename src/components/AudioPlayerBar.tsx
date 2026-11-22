@@ -48,7 +48,6 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
   const [duration, setDuration] = useState(audio.duration || 10);
   const [playbackSpeed, setPlaybackSpeed] = useState<1.0 | 1.25 | 1.5 | 2.0>(1.0);
   const [isMuted, setIsMuted] = useState(false);
-  const [animTick, setAnimTick] = useState(0);
 
   // PDF 문서인 경우 pageIndex 기본값 1 적용
   const resolvedPageIndex = audio.pageIndex !== undefined ? audio.pageIndex : (isPdfNote ? 1 : undefined);
@@ -158,10 +157,8 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
   // 재생 타이머 (실제 HTML5 오디오가 없거나 시뮬레이션일 때)
   useEffect(() => {
     let timer: any = null;
-    let animTimer: any = null;
 
     if (isPlaying) {
-      // 1. 재생 진행 타이머
       if (!audioRef.current || !isHtmlAudioSupported.current) {
         const intervalMs = Math.round(1000 / playbackSpeed);
         timer = setInterval(() => {
@@ -174,16 +171,10 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
           });
         }, intervalMs);
       }
-
-      // 2. 실시간 파형 애니메이션 펄스 틱
-      animTimer = setInterval(() => {
-        setAnimTick((t) => (t + 1) % 6);
-      }, 150);
     }
 
     return () => {
       if (timer) clearInterval(timer);
-      if (animTimer) clearInterval(animTimer);
     };
   }, [isPlaying, duration, playbackSpeed]);
 
@@ -375,21 +366,15 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
         >
           {waveformHeights.map((h, idx) => {
             const isPast = idx <= activeBarIndex;
-            const isCurrent = idx === activeBarIndex && isPlaying;
-            const dynamicHeight = isCurrent
-              ? Math.min(28, h + (animTick % 2 === 0 ? 5 : -3))
-              : h;
-
             return (
               <View
                 key={idx}
                 style={[
                   styles.waveformBar,
                   {
-                    height: dynamicHeight,
+                    height: h,
                     backgroundColor: isPast ? (accentColor || '#2563EB') : '#CBD5E1',
                     opacity: isPast ? 1 : 0.65,
-                    transform: isCurrent ? [{ scaleY: 1.15 }] : undefined,
                   },
                 ]}
               />

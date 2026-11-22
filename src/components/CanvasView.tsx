@@ -28,13 +28,19 @@ import {
   Undo2,
   Redo2,
   Trash2,
+  LayoutGrid,
+  Volume2,
+  VolumeX,
 } from 'lucide-react-native';
+import { recognizeShape } from '../utils/shapeRecognizer';
+import { triggerWritingScratch, stopWritingScratch, playWritingSoundPreview } from '../utils/writingSound';
 
 const CANVAS_WIDTH = 2600;
 const CANVAS_HEIGHT = 2600;
 
 interface DraggableStickyProps {
   note: Note;
+  zoomLevel: number;
   onDragStart?: () => void;
   onDragEnd: (id: string, x: number, y: number) => void;
   onBringToFront: (id: string) => void;
@@ -43,6 +49,7 @@ interface DraggableStickyProps {
 
 const DraggableSticky: React.FC<DraggableStickyProps> = ({
   note,
+  zoomLevel,
   onDragStart,
   onDragEnd,
   onBringToFront,
@@ -53,12 +60,16 @@ const DraggableSticky: React.FC<DraggableStickyProps> = ({
 
   const currentPosRef = useRef({ x: note.canvasX || 50, y: note.canvasY || 50 });
   const startPosRef = useRef({ x: note.canvasX || 50, y: note.canvasY || 50 });
+  const zoomRef = useRef(zoomLevel || 1);
+  zoomRef.current = zoomLevel || 1;
 
   useEffect(() => {
-    const updated = { x: note.canvasX || 50, y: note.canvasY || 50 };
-    setPosition(updated);
-    currentPosRef.current = updated;
-  }, [note.canvasX, note.canvasY]);
+    if (!isDragging) {
+      const updated = { x: note.canvasX || 50, y: note.canvasY || 50 };
+      setPosition(updated);
+      currentPosRef.current = updated;
+    }
+  }, [note.canvasX, note.canvasY, isDragging]);
 
   const panResponder = useRef(
     PanResponder.create({
@@ -77,23 +88,25 @@ const DraggableSticky: React.FC<DraggableStickyProps> = ({
         startPosRef.current = { x: currentPosRef.current.x, y: currentPosRef.current.y };
       },
       onPanResponderMove: (_, gesture) => {
-        const newX = Math.max(10, Math.min(CANVAS_WIDTH - 300, startPosRef.current.x + gesture.dx));
-        const newY = Math.max(10, Math.min(CANVAS_HEIGHT - 320, startPosRef.current.y + gesture.dy));
+        const z = zoomRef.current || 1;
+        const newX = Math.max(10, Math.min(CANVAS_WIDTH - 300, startPosRef.current.x + gesture.dx / z));
+        const newY = Math.max(10, Math.min(CANVAS_HEIGHT - 320, startPosRef.current.y + gesture.dy / z));
         setPosition({ x: newX, y: newY });
         currentPosRef.current = { x: newX, y: newY };
       },
       onPanResponderTerminationRequest: () => false,
       onPanResponderRelease: (_, gesture) => {
-        setIsDragging(false);
-        const finalX = Math.max(10, Math.min(CANVAS_WIDTH - 300, startPosRef.current.x + gesture.dx));
-        const finalY = Math.max(10, Math.min(CANVAS_HEIGHT - 320, startPosRef.current.y + gesture.dy));
+        const z = zoomRef.current || 1;
+        const finalX = Math.max(10, Math.min(CANVAS_WIDTH - 300, startPosRef.current.x + gesture.dx / z));
+        const finalY = Math.max(10, Math.min(CANVAS_HEIGHT - 320, startPosRef.current.y + gesture.dy / z));
         setPosition({ x: finalX, y: finalY });
         currentPosRef.current = { x: finalX, y: finalY };
         onDragEnd(note.id, finalX, finalY);
+        setIsDragging(false);
       },
       onPanResponderTerminate: () => {
-        setIsDragging(false);
         onDragEnd(note.id, currentPosRef.current.x, currentPosRef.current.y);
+        setIsDragging(false);
       },
     })
   ).current;
@@ -109,6 +122,13 @@ const DraggableSticky: React.FC<DraggableStickyProps> = ({
           transform: isDragging ? [{ scale: 1.03 }] : [{ scale: 1 }],
           opacity: isDragging ? 0.95 : 1,
         },
+        Platform.OS === 'web'
+          ? ({
+              transition: isDragging
+                ? 'none'
+                : 'left 0.22s cubic-bezier(0.22, 1, 0.36, 1), top 0.22s cubic-bezier(0.22, 1, 0.36, 1)',
+            } as any)
+          : null,
       ]}
     >
       {/* Top Drag Control Bar */}
@@ -138,11 +158,27 @@ const DraggableSticky: React.FC<DraggableStickyProps> = ({
   );
 };
 
-// Quadratic Bézier curve smoothing engine
-const strokePointsToPath = (points?: { x: number; y: number }[], isRuler?: boolean) => {
+// Quadratic Bézier curve & closed polygon smoothing engine
+const strokePointsToPath = (
+  points?: { x: number; y: number }[],
+  isRuler?: boolean,
+  isPolygon?: boolean
+) => {
   if (!points || points.length === 0) return '';
   if (isRuler && points.length >= 2) {
     return `M ${points[0].x} ${points[0].y} L ${points[points.length - 1].x} ${points[points.length - 1].y}`;
+  }
+  const isClosedPoly =
+    isPolygon ||
+    (points.length >= 4 &&
+      points.length <= 8 &&
+      Math.hypot(points[0].x - points[points.length - 1].x, points[0].y - points[points.length - 1].y) < 2);
+  if (isClosedPoly) {
+    let polyPath = `M ${points[0].x} ${points[0].y}`;
+    for (let i = 1; i < points.length; i++) {
+      polyPath += ` L ${points[i].x} ${points[i].y}`;
+    }
+    return polyPath + ' Z';
   }
   if (points.length === 1) {
     return `M ${points[0].x} ${points[0].y} L ${points[0].x + 0.5} ${points[0].y + 0.5}`;
@@ -177,7 +213,7 @@ const renderStrokePath = (stroke: FreeHandStroke) => {
     return `M ${p0.x} ${p0.y} L ${p1.x} ${p1.y} M ${ax1} ${ay1} L ${p1.x} ${p1.y} L ${ax2} ${ay2}`;
   }
 
-  return strokePointsToPath(points, stroke.isRuler);
+  return strokePointsToPath(points, stroke.isRuler, stroke.isPolygon);
 };
 
 // 선분과 점 사이의 거리 계산
@@ -228,12 +264,14 @@ export const CanvasView: React.FC = () => {
     activeBoardId,
     filters,
     updateCanvasPosition,
+    arrangeCanvasNotes,
     bringToFront,
     duplicateNote,
     canvasBoardStrokes,
-    addCanvasBoardStroke,
     setCanvasBoardStrokes,
     clearCanvasBoardStrokes,
+    writingSoundEnabled,
+    setWritingSoundEnabled,
   } = useNoteStore();
 
   const [zoomLevel, setZoomLevel] = useState<number>(1);
@@ -246,6 +284,7 @@ export const CanvasView: React.FC = () => {
   const [boardTool, setBoardTool] = useState<'pen' | 'connector' | 'highlighter' | 'eraser'>('pen');
   const [boardColor, setBoardColor] = useState<string>('#2563EB');
   const [boardWidth, setBoardWidth] = useState<number>(4);
+  const [autoSnapShape, setAutoSnapShape] = useState<boolean>(true);
   const [currentBoardStroke, setCurrentBoardStroke] = useState<FreeHandStroke | null>(null);
   const [boardUndoStack, setBoardUndoStack] = useState<FreeHandStroke[][]>([]);
   const [boardRedoStack, setBoardRedoStack] = useState<FreeHandStroke[][]>([]);
@@ -286,6 +325,15 @@ export const CanvasView: React.FC = () => {
     innerScrollRef.current?.scrollTo({ x: 0, y: 0, animated: true });
   };
 
+  const handleSelectBoardTool = (nextTool: 'pen' | 'connector' | 'highlighter' | 'eraser') => {
+    setBoardTool(nextTool);
+    if (nextTool === 'highlighter' && boardWidth <= 10) {
+      setBoardWidth(24);
+    } else if ((nextTool === 'pen' || nextTool === 'connector') && boardWidth > 10) {
+      setBoardWidth(5);
+    }
+  };
+
   // PanResponder 및 Web 이벤트 최신 상태 동기화용 Mutable Refs
   const boardToolRef = useRef(boardTool);
   boardToolRef.current = boardTool;
@@ -296,6 +344,12 @@ export const CanvasView: React.FC = () => {
   const boardWidthRef = useRef(boardWidth);
   boardWidthRef.current = boardWidth;
 
+  const autoSnapShapeRef = useRef(autoSnapShape);
+  autoSnapShapeRef.current = autoSnapShape;
+
+  const writingSoundEnabledRef = useRef(writingSoundEnabled);
+  writingSoundEnabledRef.current = writingSoundEnabled;
+
   const canvasModeRef = useRef(canvasMode);
   canvasModeRef.current = canvasMode;
 
@@ -305,6 +359,7 @@ export const CanvasView: React.FC = () => {
   const dragStartBoardStrokesRef = useRef<FreeHandStroke[]>([]);
   const hasErasedInThisBoardDragRef = useRef(false);
   const isErasingRef = useRef(false);
+  const rafBoardIdRef = useRef<number | null>(null);
 
   // 화이트보드 실행 취소 (Undo / Redo - 스냅샷 기반)
   const handleBoardUndo = () => {
@@ -371,9 +426,7 @@ export const CanvasView: React.FC = () => {
           points: [{ x: locationX, y: locationY }],
           color: boardColorRef.current,
           width:
-            boardToolRef.current === 'highlighter'
-              ? 22
-              : boardToolRef.current === 'connector'
+            boardToolRef.current === 'connector'
               ? boardWidthRef.current * 1.2
               : boardWidthRef.current,
           tool: boardToolRef.current,
@@ -390,6 +443,15 @@ export const CanvasView: React.FC = () => {
 
         setCurrentBoardStroke((prev) => {
           if (!prev) return null;
+          const lastPt = prev.points[prev.points.length - 1];
+          if (lastPt) {
+            triggerWritingScratch(
+              locationX - lastPt.x,
+              locationY - lastPt.y,
+              writingSoundEnabledRef.current,
+              prev.tool
+            );
+          }
           if (prev.tool === 'connector') {
             return {
               ...prev,
@@ -403,6 +465,7 @@ export const CanvasView: React.FC = () => {
         });
       },
       onPanResponderRelease: () => {
+        stopWritingScratch();
         if (boardToolRef.current === 'eraser') {
           isErasingRef.current = false;
           if (hasErasedInThisBoardDragRef.current) {
@@ -415,9 +478,25 @@ export const CanvasView: React.FC = () => {
 
         setCurrentBoardStroke((active) => {
           if (active && active.points.length > 0) {
+            let finalStroke = active;
+            if (
+              autoSnapShapeRef.current &&
+              (active.tool === 'pen' || active.tool === 'highlighter')
+            ) {
+              const recognized = recognizeShape(active.points);
+              if (recognized) {
+                finalStroke = {
+                  ...active,
+                  points: recognized.points,
+                  isPolygon:
+                    recognized.isPolygon ??
+                    (recognized.type === 'rectangle' || recognized.type === 'triangle'),
+                };
+              }
+            }
             setBoardUndoStack((h) => [...h, strokesRef.current]);
             setBoardRedoStack([]);
-            const next = [...strokesRef.current, active];
+            const next = [...strokesRef.current, finalStroke];
             strokesRef.current = next;
             setCanvasBoardStrokes(next);
           }
@@ -427,7 +506,7 @@ export const CanvasView: React.FC = () => {
     })
   ).current;
 
-  // 데스크톱 Web 마우스 드로잉 및 지우개 핸들러
+  // 데스크톱 Web 마우스 드로잉 및 지우개 핸들러 (60fps 무끊김 + 사각사각 ASMR 사운드)
   const handleWebMouseDown = (e: any) => {
     if (Platform.OS !== 'web' || canvasModeRef.current !== 'draw') return;
     const rect = e.currentTarget.getBoundingClientRect();
@@ -468,9 +547,7 @@ export const CanvasView: React.FC = () => {
       points: [{ x, y }],
       color: boardColorRef.current,
       width:
-        boardToolRef.current === 'highlighter'
-          ? 22
-          : boardToolRef.current === 'connector'
+        boardToolRef.current === 'connector'
           ? boardWidthRef.current * 1.2
           : boardWidthRef.current,
       tool: boardToolRef.current,
@@ -479,10 +556,17 @@ export const CanvasView: React.FC = () => {
     setCurrentBoardStroke(newStroke);
 
     let activeStroke = newStroke;
+    let lastPt = { x, y };
 
     const onMouseMove = (moveEvent: MouseEvent) => {
       const curX = (moveEvent.clientX - rect.left) / zoomLevel;
       const curY = (moveEvent.clientY - rect.top) / zoomLevel;
+      const dx = curX - lastPt.x;
+      const dy = curY - lastPt.y;
+      if (Math.hypot(dx, dy) < 1.2) return;
+
+      triggerWritingScratch(dx, dy, writingSoundEnabledRef.current, activeStroke.tool);
+      lastPt = { x: curX, y: curY };
 
       if (activeStroke.tool === 'connector') {
         activeStroke = {
@@ -490,21 +574,48 @@ export const CanvasView: React.FC = () => {
           points: [activeStroke.points[0], { x: curX, y: curY }],
         };
       } else {
-        activeStroke = {
-          ...activeStroke,
-          points: [...activeStroke.points, { x: curX, y: curY }],
-        };
+        activeStroke.points.push({ x: curX, y: curY });
+        activeStroke = { ...activeStroke };
       }
-      setCurrentBoardStroke(activeStroke);
+
+      if (rafBoardIdRef.current === null && typeof requestAnimationFrame !== 'undefined') {
+        rafBoardIdRef.current = requestAnimationFrame(() => {
+          rafBoardIdRef.current = null;
+          setCurrentBoardStroke({ ...activeStroke });
+        });
+      } else if (typeof requestAnimationFrame === 'undefined') {
+        setCurrentBoardStroke(activeStroke);
+      }
     };
 
     const onMouseUp = () => {
+      stopWritingScratch();
+      if (rafBoardIdRef.current !== null && typeof cancelAnimationFrame !== 'undefined') {
+        cancelAnimationFrame(rafBoardIdRef.current);
+        rafBoardIdRef.current = null;
+      }
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
       if (activeStroke && activeStroke.points.length > 0) {
+        let finalStroke = activeStroke;
+        if (
+          autoSnapShapeRef.current &&
+          (activeStroke.tool === 'pen' || activeStroke.tool === 'highlighter')
+        ) {
+          const recognized = recognizeShape(activeStroke.points);
+          if (recognized) {
+            finalStroke = {
+              ...activeStroke,
+              points: recognized.points,
+              isPolygon:
+                recognized.isPolygon ??
+                (recognized.type === 'rectangle' || recognized.type === 'triangle'),
+            };
+          }
+        }
         setBoardUndoStack((h) => [...h, strokesRef.current]);
         setBoardRedoStack([]);
-        const next = [...strokesRef.current, activeStroke];
+        const next = [...strokesRef.current, finalStroke];
         strokesRef.current = next;
         setCanvasBoardStrokes(next);
         setCurrentBoardStroke(null);
@@ -523,10 +634,20 @@ export const CanvasView: React.FC = () => {
           <Sparkles size={14} color="#D97706" />
           <Text style={styles.bannerGuideText}>
             {canvasMode === 'pan'
-              ? '스티커 핸들을 잡고 이동하거나 캔버스를 스크롤하세요.'
+              ? '스티커 핸들을 잡고 이동하거나 [격자 자동 정렬]로 한 번에 정돈하세요.'
               : '보드 필기 모드: 펜이나 화살표 연결선으로 생각을 자유롭게 연결하세요!'}
           </Text>
         </View>
+
+        {/* Auto-Arrange Grid Button */}
+        <TouchableOpacity
+          style={styles.autoArrangeBtn}
+          onPress={arrangeCanvasNotes}
+          {...(Platform.OS === 'web' ? ({ onClick: arrangeCanvasNotes } as any) : {})}
+        >
+          <LayoutGrid size={12} color="#1D4ED8" />
+          <Text style={styles.autoArrangeBtnText}>격자 자동 정렬</Text>
+        </TouchableOpacity>
 
         {/* Mode Switch Pills */}
         <View style={styles.modeToggleGroup}>
@@ -585,8 +706,8 @@ export const CanvasView: React.FC = () => {
           <View style={styles.floatingToolGroup}>
             <TouchableOpacity
               style={[styles.fToolBtn, boardTool === 'pen' && styles.fToolBtnActive]}
-              onPress={() => setBoardTool('pen')}
-              {...(Platform.OS === 'web' ? ({ onClick: () => setBoardTool('pen') } as any) : {})}
+              onPress={() => handleSelectBoardTool('pen')}
+              {...(Platform.OS === 'web' ? ({ onClick: () => handleSelectBoardTool('pen') } as any) : {})}
             >
               <PenTool size={14} color={boardTool === 'pen' ? '#2563EB' : '#475569'} />
               <Text style={[styles.fToolText, boardTool === 'pen' && styles.fToolTextActive]}>
@@ -596,8 +717,8 @@ export const CanvasView: React.FC = () => {
 
             <TouchableOpacity
               style={[styles.fToolBtn, boardTool === 'connector' && styles.fToolBtnActive]}
-              onPress={() => setBoardTool('connector')}
-              {...(Platform.OS === 'web' ? ({ onClick: () => setBoardTool('connector') } as any) : {})}
+              onPress={() => handleSelectBoardTool('connector')}
+              {...(Platform.OS === 'web' ? ({ onClick: () => handleSelectBoardTool('connector') } as any) : {})}
             >
               <ArrowRight size={14} color={boardTool === 'connector' ? '#2563EB' : '#475569'} />
               <Text style={[styles.fToolText, boardTool === 'connector' && styles.fToolTextActive]}>
@@ -607,8 +728,8 @@ export const CanvasView: React.FC = () => {
 
             <TouchableOpacity
               style={[styles.fToolBtn, boardTool === 'highlighter' && styles.fToolBtnActive]}
-              onPress={() => setBoardTool('highlighter')}
-              {...(Platform.OS === 'web' ? ({ onClick: () => setBoardTool('highlighter') } as any) : {})}
+              onPress={() => handleSelectBoardTool('highlighter')}
+              {...(Platform.OS === 'web' ? ({ onClick: () => handleSelectBoardTool('highlighter') } as any) : {})}
             >
               <Highlighter size={14} color={boardTool === 'highlighter' ? '#2563EB' : '#475569'} />
               <Text style={[styles.fToolText, boardTool === 'highlighter' && styles.fToolTextActive]}>
@@ -618,8 +739,8 @@ export const CanvasView: React.FC = () => {
 
             <TouchableOpacity
               style={[styles.fToolBtn, boardTool === 'eraser' && styles.fToolBtnActive]}
-              onPress={() => setBoardTool('eraser')}
-              {...(Platform.OS === 'web' ? ({ onClick: () => setBoardTool('eraser') } as any) : {})}
+              onPress={() => handleSelectBoardTool('eraser')}
+              {...(Platform.OS === 'web' ? ({ onClick: () => handleSelectBoardTool('eraser') } as any) : {})}
             >
               <Eraser size={14} color={boardTool === 'eraser' ? '#EF4444' : '#475569'} />
               <Text
@@ -633,14 +754,21 @@ export const CanvasView: React.FC = () => {
             </TouchableOpacity>
           </View>
 
-          {/* Stroke Width Selector */}
-          {boardTool !== 'highlighter' && boardTool !== 'eraser' && (
+          {/* Stroke Width Selector (Supports both Pen/Connector and Highlighter) */}
+          {boardTool !== 'eraser' && (
             <View style={styles.fWidthGroup}>
-              {[
-                { id: 'w2', val: 2 },
-                { id: 'w5', val: 5 },
-                { id: 'w10', val: 10 },
-              ].map((w) => (
+              {(boardTool === 'highlighter'
+                ? [
+                    { id: 'hl14', val: 14, dot: 6 },
+                    { id: 'hl24', val: 24, dot: 10 },
+                    { id: 'hl36', val: 36, dot: 14 },
+                  ]
+                : [
+                    { id: 'w2', val: 2, dot: 4 },
+                    { id: 'w5', val: 5, dot: 7 },
+                    { id: 'w10', val: 10, dot: 12 },
+                  ]
+              ).map((w) => (
                 <TouchableOpacity
                   key={w.id}
                   style={[styles.fWidthBtn, boardWidth === w.val && styles.fWidthBtnActive]}
@@ -648,8 +776,8 @@ export const CanvasView: React.FC = () => {
                 >
                   <View
                     style={{
-                      width: w.val * 1.4,
-                      height: w.val * 1.4,
+                      width: w.dot,
+                      height: w.dot,
                       borderRadius: 10,
                       backgroundColor: boardWidth === w.val ? '#2563EB' : '#94A3B8',
                     }}
@@ -657,6 +785,47 @@ export const CanvasView: React.FC = () => {
                 </TouchableOpacity>
               ))}
             </View>
+          )}
+
+          {/* Auto-Snap Shape Toggle */}
+          {(boardTool === 'pen' || boardTool === 'highlighter') && (
+            <>
+              <TouchableOpacity
+                style={[styles.fToolBtn, autoSnapShape && styles.fToolBtnActive]}
+                onPress={() => setAutoSnapShape(!autoSnapShape)}
+              >
+                <Sparkles size={12} color={autoSnapShape ? '#2563EB' : '#64748B'} />
+                <Text style={[styles.fToolText, autoSnapShape && styles.fToolTextActive]}>
+                  도형보정 {autoSnapShape ? 'ON' : 'OFF'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.fToolBtn,
+                  writingSoundEnabled && { backgroundColor: '#ECFDF5', borderColor: '#10B981', borderWidth: 1 },
+                ]}
+                onPress={() => {
+                  const next = !writingSoundEnabled;
+                  setWritingSoundEnabled(next);
+                  if (next) playWritingSoundPreview();
+                  else stopWritingScratch();
+                }}
+              >
+                {writingSoundEnabled ? (
+                  <Volume2 size={12} color="#059669" />
+                ) : (
+                  <VolumeX size={12} color="#64748B" />
+                )}
+                <Text
+                  style={[
+                    styles.fToolText,
+                    writingSoundEnabled && { color: '#059669', fontWeight: '700' },
+                  ]}
+                >
+                  필기음 {writingSoundEnabled ? 'ON' : 'OFF'}
+                </Text>
+              </TouchableOpacity>
+            </>
           )}
 
           {/* Color Palette */}
@@ -680,7 +849,6 @@ export const CanvasView: React.FC = () => {
           <View style={styles.fActionGroup}>
             <TouchableOpacity
               onPress={handleBoardUndo}
-              {...(Platform.OS === 'web' ? ({ onClick: handleBoardUndo } as any) : {})}
               disabled={boardUndoStack.length === 0}
               style={[styles.fActionBtn, boardUndoStack.length === 0 && { opacity: 0.35 }]}
             >
@@ -689,7 +857,6 @@ export const CanvasView: React.FC = () => {
 
             <TouchableOpacity
               onPress={handleBoardRedo}
-              {...(Platform.OS === 'web' ? ({ onClick: handleBoardRedo } as any) : {})}
               disabled={boardRedoStack.length === 0}
               style={[styles.fActionBtn, boardRedoStack.length === 0 && { opacity: 0.35 }]}
             >
@@ -698,7 +865,6 @@ export const CanvasView: React.FC = () => {
 
             <TouchableOpacity
               onPress={handleBoardClear}
-              {...(Platform.OS === 'web' ? ({ onClick: handleBoardClear } as any) : {})}
               style={styles.fActionBtn}
             >
               <Trash2 size={14} color="#EF4444" />
@@ -801,6 +967,7 @@ export const CanvasView: React.FC = () => {
             <DraggableSticky
               key={note.id}
               note={note}
+              zoomLevel={zoomLevel}
               onDragStart={() => setIsDraggingAny(true)}
               onDragEnd={(id, x, y) => {
                 setIsDraggingAny(false);
@@ -844,6 +1011,22 @@ const styles = StyleSheet.create({
     fontSize: 11.5,
     color: '#92400E',
     fontWeight: '600',
+  },
+  autoArrangeBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1,
+    borderColor: '#93C5FD',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+  },
+  autoArrangeBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#1D4ED8',
   },
   modeToggleGroup: {
     flexDirection: 'row',

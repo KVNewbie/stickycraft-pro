@@ -117,7 +117,9 @@ export const StatusBarPinBanner: React.FC = () => {
                     style={[styles.cardSnippet, { color: colorCfg.text }]}
                     numberOfLines={1}
                   >
-                    {isChecklist
+                    {note.isLocked
+                      ? '🔒 비밀번호로 보호된 메모'
+                      : isChecklist
                       ? `[체크리스트 ${completedCount}/${note.checklist!.length}] ${note.checklist![0]?.text || ''}`
                       : note.content || '내용 없음'}
                   </Text>

@@ -29,13 +29,29 @@ import {
   X,
   Eye,
   Bell,
+  Tag,
+  Sparkles,
+  Folder,
+  Archive,
+  Smile,
+  Layers,
+  Plus,
 } from 'lucide-react-native';
-import { Note, NoteColorId, AudioNote, NoteFontSize } from '../types/note';
+import {
+  Note,
+  NoteColorId,
+  AudioNote,
+  NoteFontSize,
+  PaperTemplate,
+  DecoStyle,
+  PlannerSticker,
+} from '../types/note';
 import { NOTE_COLORS, COLOR_KEYS } from '../constants/colors';
 import { useNoteStore } from '../store/useNoteStore';
 import { PaperTemplatePattern } from './PaperTemplatePattern';
 import { AudioRecordingStudio } from './AudioRecordingStudio';
 import { ColorNoteColorMapModal } from './ColorNoteColorMapModal';
+import { PlannerStickerModal } from './PlannerStickerModal';
 
 interface ColorNoteTextEditorProps {
   note?: Note | null;
@@ -49,28 +65,71 @@ const FONT_PRESETS: Record<NoteFontSize, { label: string; size: number; lineHeig
   xl: { label: '특대', size: 26, lineHeight: 42 },
 };
 
+const TEMPLATE_OPTIONS: { id: PaperTemplate; label: string }[] = [
+  { id: 'lined', label: '줄노트' },
+  { id: 'grid', label: '모눈' },
+  { id: 'dot', label: '도트' },
+  { id: 'cornell', label: '코넬' },
+  { id: 'blank', label: '무지' },
+  { id: 'dark', label: '칠판' },
+];
+
+const DECO_OPTIONS: { id: DecoStyle; label: string }[] = [
+  { id: 'tape', label: '테이프' },
+  { id: 'pin', label: '압정 핀' },
+  { id: 'corner-fold', label: '모서리접기' },
+  { id: 'minimal', label: '미니멀' },
+];
+
 export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
   note: initialNote,
   onClose,
 }) => {
   const {
+    notes,
+    boards,
+    activeBoardId,
+    autoStartVoiceRecording,
     addNote,
     updateNote,
     deleteNote,
     toggleNoteLock,
+    toggleArchiveNote,
     openReminderModal,
   } = useNoteStore();
 
   const [noteId] = useState<string>(initialNote?.id || '');
-  const [title, setTitle] = useState<string>(initialNote?.title || '');
+  const liveNote = useMemo(
+    () => (noteId ? notes.find((n) => n.id === noteId) || initialNote : initialNote),
+    [notes, noteId, initialNote]
+  );
+
+  const [title, setTitle] = useState<string>(
+    initialNote?.title || (autoStartVoiceRecording ? '음성 녹음 메모' : '')
+  );
   const [content, setContent] = useState<string>(initialNote?.content || '');
   const [color, setColor] = useState<NoteColorId>(initialNote?.color || 'yellow');
   const [isPinned, setIsPinned] = useState<boolean>(initialNote?.isPinned || false);
   const [isLocked, setIsLocked] = useState<boolean>(initialNote?.isLocked || false);
   const [audioNotes, setAudioNotes] = useState<AudioNote[]>(initialNote?.audioNotes || []);
+  const [boardId, setBoardId] = useState<string>(
+    initialNote?.boardId && initialNote.boardId !== 'all'
+      ? initialNote.boardId
+      : activeBoardId !== 'all'
+      ? activeBoardId
+      : 'ideas'
+  );
+  const [tags, setTags] = useState<string[]>(initialNote?.tags || []);
+  const [tagInput, setTagInput] = useState<string>('');
+  const [stickers, setStickers] = useState<PlannerSticker[]>(initialNote?.stickers || []);
+  const [paperTemplate, setPaperTemplate] = useState<PaperTemplate>(
+    initialNote?.paperTemplate || 'lined'
+  );
+  const [decoStyle, setDecoStyle] = useState<DecoStyle>(initialNote?.decoStyle || 'tape');
+  const [isMetaPanelOpen, setIsMetaPanelOpen] = useState<boolean>(false);
+  const [isStickerModalOpen, setIsStickerModalOpen] = useState<boolean>(false);
 
   // ColorNote 1:1 읽기 모드 (View) vs 편집 모드 (Edit)
-  // 기존 메모가 있고 내용이나 제목이 있으면 읽기 모드로 시작 (오작동 방지)
   const [isEditMode, setIsEditMode] = useState<boolean>(
     !initialNote || (!initialNote.title && !initialNote.content)
   );
@@ -86,27 +145,51 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const [isColorPickerOpen, setIsColorPickerOpen] = useState(false);
-  const [isRecording, setIsRecording] = useState(false);
+  const [isRecording, setIsRecording] = useState<boolean>(Boolean(autoStartVoiceRecording));
 
   const contentInputRef = useRef<TextInput>(null);
 
   const activeColorConfig = NOTE_COLORS[color] || NOTE_COLORS.yellow;
   const currentFontConfig = FONT_PRESETS[fontSize] || FONT_PRESETS.base;
+  const isDarkTemplate = paperTemplate === 'dark';
+  const effectiveTextColor = isDarkTemplate ? '#F8FAFC' : activeColorConfig.text;
+  const effectiveMutedColor = isDarkTemplate ? '#94A3B8' : activeColorConfig.textMuted;
+
+  const handleAddTag = () => {
+    const cleaned = tagInput.trim().replace(/^#/, '');
+    if (!cleaned) return;
+    if (!tags.includes(cleaned)) {
+      const nextTags = [...tags, cleaned];
+      setTags(nextTags);
+      if (noteId) updateNote(noteId, { tags: nextTags });
+    }
+    setTagInput('');
+  };
+
+  const handleRemoveTag = (tagToRemove: string) => {
+    const nextTags = tags.filter((t) => t !== tagToRemove);
+    setTags(nextTags);
+    if (noteId) updateNote(noteId, { tags: nextTags });
+  };
 
   // 자동 저장 핸들러
   const handleSaveAndExit = () => {
-    // 텍스트와 제목이 모두 비어있고 음성도 없으면 저장하지 않고 닫기
-    if (!title.trim() && !content.trim() && audioNotes.length === 0) {
+    // 텍스트와 제목이 모두 비어있고 음성/스티커도 없으면 저장하지 않고 닫기
+    if (!title.trim() && !content.trim() && audioNotes.length === 0 && stickers.length === 0) {
       onClose();
       return;
     }
 
     if (noteId) {
-      // 기존 메모 업데이트
       updateNote(noteId, {
         title: title.trim(),
         content: content,
         color,
+        decoStyle,
+        tags,
+        stickers,
+        boardId,
+        paperTemplate,
         isPinned,
         isLocked,
         audioNotes,
@@ -115,21 +198,21 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
         editorMode: 'text',
       });
     } else {
-      // 새 메모 추가
       addNote({
         title: title.trim(),
         content: content,
         color,
-        decoStyle: 'minimal',
+        decoStyle,
         images: [],
         checklist: [],
-        tags: [],
+        tags,
+        stickers,
         isPinned,
         isLocked,
         audioNotes,
         fontSize,
-        boardId: 'all',
-        paperTemplate: 'lined',
+        boardId,
+        paperTemplate,
         noteType: 'text',
         editorMode: 'text',
       });
@@ -144,6 +227,11 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
         title: title.trim(),
         content: content,
         color,
+        decoStyle,
+        tags,
+        stickers,
+        boardId,
+        paperTemplate,
         isPinned,
         isLocked,
         audioNotes,
@@ -186,7 +274,7 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
     if (noteId) {
       updateNote(noteId, { fontSize: next });
     }
-    showToast(`🔤 글자 크기: ${FONT_PRESETS[next].label} (${FONT_PRESETS[next].size}px)`);
+    showToast(`🔤 글자 크기: ${FONT_PRESETS[next].label} (${FONT_PRESETS[next].size}px) • 줄간격 자동 동기화`);
   };
 
   // 오늘 날짜 삽입 헬퍼
@@ -224,10 +312,14 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
   }, [content, searchQuery]);
 
   return (
-    <SafeAreaView style={[styles.safeArea, { backgroundColor: activeColorConfig.bg }]}>
-      {/* Paper Lined Pattern Background (ColorNote Ruled Lines) */}
+    <SafeAreaView style={[styles.safeArea, { backgroundColor: isDarkTemplate ? '#1E293B' : activeColorConfig.bg }]}>
+      {/* Paper Template Background (폰트 lineHeight와 1:1 줄간격 자동 동기화) */}
       <View style={StyleSheet.absoluteFillObject} pointerEvents="none">
-        <PaperTemplatePattern template="lined" colorHex={activeColorConfig.textMuted} />
+        <PaperTemplatePattern
+          template={paperTemplate}
+          colorHex={effectiveMutedColor}
+          lineSpacing={currentFontConfig.lineHeight}
+        />
       </View>
 
       <KeyboardAvoidingView
@@ -235,7 +327,7 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
         style={styles.keyboardContainer}
       >
         {/* Top Header Bar (ColorNote Signature Top Bar) */}
-        <View style={[styles.headerBar, { borderBottomColor: activeColorConfig.cardBorder }]}>
+        <View style={[styles.headerBar, { borderBottomColor: activeColorConfig.cardBorder, backgroundColor: isDarkTemplate ? 'rgba(15,23,42,0.75)' : 'rgba(255,255,255,0.4)' }]}>
           {/* Back & Auto-save button */}
           <TouchableOpacity
             style={styles.backBtn}
@@ -243,15 +335,15 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             {...(Platform.OS === 'web' ? ({ onClick: handleSaveAndExit } as any) : {})}
           >
-            <ArrowLeft size={22} color={activeColorConfig.text} />
+            <ArrowLeft size={22} color={effectiveTextColor} />
           </TouchableOpacity>
 
           {/* Title Field (Editable in Edit Mode, Label in View Mode) */}
           {isEditMode ? (
             <TextInput
-              style={[styles.headerTitleInput, { color: activeColorConfig.text }]}
+              style={[styles.headerTitleInput, { color: effectiveTextColor }]}
               placeholder="제목 없음"
-              placeholderTextColor={activeColorConfig.textMuted}
+              placeholderTextColor={effectiveMutedColor}
               value={title}
               onChangeText={setTitle}
               maxLength={100}
@@ -263,7 +355,7 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
               {...(Platform.OS === 'web' ? ({ onClick: () => setIsEditMode(true) } as any) : {})}
             >
               <Text
-                style={[styles.headerTitleText, { color: activeColorConfig.text }]}
+                style={[styles.headerTitleText, { color: effectiveTextColor }]}
                 numberOfLines={1}
               >
                 {title || '제목 없음'}
@@ -320,7 +412,7 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
                   } as any)
                 : {})}
             >
-              <Search size={18} color={isSearchOpen ? '#2563EB' : activeColorConfig.text} />
+              <Search size={18} color={isSearchOpen ? '#2563EB' : effectiveTextColor} />
             </TouchableOpacity>
 
             {/* Quick Copy to Clipboard */}
@@ -329,7 +421,7 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
               onPress={handleCopyAll}
               {...(Platform.OS === 'web' ? ({ onClick: handleCopyAll } as any) : {})}
             >
-              <Copy size={18} color={activeColorConfig.text} />
+              <Copy size={18} color={effectiveTextColor} />
             </TouchableOpacity>
 
             {/* Color Palette Picker (ColorNote Color Map Trigger) */}
@@ -358,7 +450,7 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
               onPress={() => setIsRecording(!isRecording)}
               {...(Platform.OS === 'web' ? ({ onClick: () => setIsRecording(!isRecording) } as any) : {})}
             >
-              <Mic size={18} color={isRecording ? '#EF4444' : activeColorConfig.text} />
+              <Mic size={18} color={isRecording ? '#EF4444' : effectiveTextColor} />
             </TouchableOpacity>
 
             {/* Pin Toggle */}
@@ -369,31 +461,31 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
             >
               <Pin
                 size={18}
-                color={isPinned ? '#E11D48' : activeColorConfig.text}
+                color={isPinned ? '#E11D48' : effectiveTextColor}
                 fill={isPinned ? '#E11D48' : 'none'}
               />
             </TouchableOpacity>
 
-            {/* ColorNote 알람 & 상태바 리마인더 */}
+            {/* ColorNote 알람 & 상태바 리마인더 (실시간 스토어 반영) */}
             <TouchableOpacity
               style={[
                 styles.iconBtn,
-                initialNote?.reminder && { backgroundColor: '#FEE2E2', borderColor: '#FCA5A5' },
+                liveNote?.reminder && { backgroundColor: '#FEE2E2', borderColor: '#FCA5A5' },
               ]}
               onPress={() => {
-                if (initialNote) {
-                  openReminderModal(initialNote);
+                if (liveNote) {
+                  openReminderModal(liveNote);
                 } else {
-                  showToast('메모를 먼저 저장하신 후 알람을 설정하실 수 있습니다');
+                  showToast('편집 완료(체크) 버튼을 먼저 눌러 저장한 후 알람을 설정해 주세요');
                 }
               }}
               {...(Platform.OS === 'web'
                 ? ({
                     onClick: () => {
-                      if (initialNote) {
-                        openReminderModal(initialNote);
+                      if (liveNote) {
+                        openReminderModal(liveNote);
                       } else {
-                        showToast('메모를 먼저 저장하신 후 알람을 설정하실 수 있습니다');
+                        showToast('편집 완료(체크) 버튼을 먼저 눌러 저장한 후 알람을 설정해 주세요');
                       }
                     },
                   } as any)
@@ -401,8 +493,8 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
             >
               <Bell
                 size={18}
-                color={initialNote?.reminder ? '#DC2626' : activeColorConfig.text}
-                fill={initialNote?.reminder?.pinToStatusBar ? '#DC2626' : 'none'}
+                color={liveNote?.reminder ? '#DC2626' : effectiveTextColor}
+                fill={liveNote?.reminder?.pinToStatusBar ? '#DC2626' : 'none'}
               />
             </TouchableOpacity>
 
@@ -433,9 +525,30 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
               {isLocked ? (
                 <Lock size={18} color="#EF4444" />
               ) : (
-                <Unlock size={18} color={activeColorConfig.textMuted} />
+                <Unlock size={18} color={effectiveMutedColor} />
               )}
             </TouchableOpacity>
+
+            {/* Archive Note */}
+            {noteId ? (
+              <TouchableOpacity
+                style={styles.iconBtn}
+                onPress={() => {
+                  toggleArchiveNote(noteId);
+                  onClose();
+                }}
+                {...(Platform.OS === 'web'
+                  ? ({
+                      onClick: () => {
+                        toggleArchiveNote(noteId);
+                        onClose();
+                      },
+                    } as any)
+                  : {})}
+              >
+                <Archive size={18} color={effectiveMutedColor} />
+              </TouchableOpacity>
+            ) : null}
 
             {/* Delete Note */}
             {noteId ? (
@@ -470,6 +583,144 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
             ) : null}
           </View>
         </View>
+
+        {/* Collapsible Metadata & Styling Panel (보드 / 속지 / 카드데코 / #태그 / 플래너 스티커) */}
+        {isMetaPanelOpen && (
+          <View style={[styles.metaPanel, { borderBottomColor: activeColorConfig.cardBorder }]}>
+            {/* 1. 보드 & 속지 & 데코 선택 행 */}
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.metaRowScroll}>
+              <View style={styles.metaGroup}>
+                <Folder size={13} color="#64748B" />
+                <Text style={styles.metaGroupLabel}>폴더:</Text>
+                {boards
+                  .filter((b) => b.id !== 'all')
+                  .map((b) => (
+                    <TouchableOpacity
+                      key={b.id}
+                      style={[styles.metaChip, boardId === b.id && styles.metaChipActive]}
+                      onPress={() => setBoardId(b.id)}
+                      {...(Platform.OS === 'web' ? ({ onClick: () => setBoardId(b.id) } as any) : {})}
+                    >
+                      <Text style={[styles.metaChipText, boardId === b.id && styles.metaChipTextActive]}>
+                        {b.name}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+              </View>
+
+              <View style={styles.metaDivider} />
+
+              <View style={styles.metaGroup}>
+                <Layers size={13} color="#64748B" />
+                <Text style={styles.metaGroupLabel}>속지:</Text>
+                {TEMPLATE_OPTIONS.map((tpl) => (
+                  <TouchableOpacity
+                    key={tpl.id}
+                    style={[styles.metaChip, paperTemplate === tpl.id && styles.metaChipActive]}
+                    onPress={() => setPaperTemplate(tpl.id)}
+                    {...(Platform.OS === 'web' ? ({ onClick: () => setPaperTemplate(tpl.id) } as any) : {})}
+                  >
+                    <Text style={[styles.metaChipText, paperTemplate === tpl.id && styles.metaChipTextActive]}>
+                      {tpl.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <View style={styles.metaDivider} />
+
+              <View style={styles.metaGroup}>
+                <Sparkles size={13} color="#64748B" />
+                <Text style={styles.metaGroupLabel}>상단장식:</Text>
+                {DECO_OPTIONS.map((deco) => (
+                  <TouchableOpacity
+                    key={deco.id}
+                    style={[styles.metaChip, decoStyle === deco.id && styles.metaChipActive]}
+                    onPress={() => setDecoStyle(deco.id)}
+                    {...(Platform.OS === 'web' ? ({ onClick: () => setDecoStyle(deco.id) } as any) : {})}
+                  >
+                    <Text style={[styles.metaChipText, decoStyle === deco.id && styles.metaChipTextActive]}>
+                      {deco.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </ScrollView>
+
+            {/* 2. 태그 입력 & 플래너 스티커 행 */}
+            <View style={styles.metaTagStickerRow}>
+              <View style={styles.tagInputBox}>
+                <Tag size={13} color="#64748B" />
+                <TextInput
+                  style={styles.tagTextInput}
+                  placeholder="태그 추가 후 Enter..."
+                  placeholderTextColor="#94A3B8"
+                  value={tagInput}
+                  onChangeText={setTagInput}
+                  onSubmitEditing={handleAddTag}
+                />
+                {tagInput.trim().length > 0 && (
+                  <TouchableOpacity
+                    style={styles.tagAddMiniBtn}
+                    onPress={handleAddTag}
+                    {...(Platform.OS === 'web' ? ({ onClick: handleAddTag } as any) : {})}
+                  >
+                    <Text style={styles.tagAddMiniBtnText}>추가</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+
+              <TouchableOpacity
+                style={styles.stickerOpenBtn}
+                onPress={() => setIsStickerModalOpen(true)}
+                {...(Platform.OS === 'web' ? ({ onClick: () => setIsStickerModalOpen(true) } as any) : {})}
+              >
+                <Smile size={14} color="#7C3AED" />
+                <Text style={styles.stickerOpenBtnText}>스티커 ({stickers.length})</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+
+        {/* Active Tags & Stickers Preview Strip */}
+        {(tags.length > 0 || stickers.length > 0) && (
+          <View style={styles.activeBadgesStrip}>
+            {stickers.map((st) => (
+              <TouchableOpacity
+                key={st.id}
+                style={styles.stickerBadgePill}
+                onPress={() => {
+                  const next = stickers.filter((s) => s.id !== st.id);
+                  setStickers(next);
+                  if (noteId) updateNote(noteId, { stickers: next });
+                }}
+                {...(Platform.OS === 'web'
+                  ? ({
+                      onClick: () => {
+                        const next = stickers.filter((s) => s.id !== st.id);
+                        setStickers(next);
+                        if (noteId) updateNote(noteId, { stickers: next });
+                      },
+                    } as any)
+                  : {})}
+              >
+                <Text style={styles.stickerBadgeEmoji}>
+                  {st.emoji} {st.label} ×
+                </Text>
+              </TouchableOpacity>
+            ))}
+            {tags.map((t) => (
+              <TouchableOpacity
+                key={t}
+                style={styles.tagBadgePill}
+                onPress={() => handleRemoveTag(t)}
+                {...(Platform.OS === 'web' ? ({ onClick: () => handleRemoveTag(t) } as any) : {})}
+              >
+                <Text style={styles.tagBadgeText}>#{t} ×</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
 
         {/* In-Note Search Bar */}
         {isSearchOpen && (
@@ -522,6 +773,24 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
           onClose={() => setIsColorPickerOpen(false)}
         />
 
+        {/* Planner Sticker Picker Modal */}
+        <PlannerStickerModal
+          visible={isStickerModalOpen}
+          onSelectSticker={(sticker) => {
+            setStickers((prev) => {
+              const next = [...prev, sticker];
+              if (noteId) updateNote(noteId, { stickers: next });
+              return next;
+            });
+            showToast(`${sticker.emoji} '${sticker.label}' 스티커 부착됨`);
+          }}
+          onInsertStickerText={(txt) => {
+            setContent((prev) => (prev ? `${prev}\n${txt}` : txt));
+            setIsEditMode(true);
+          }}
+          onClose={() => setIsStickerModalOpen(false)}
+        />
+
         {/* Audio Recording Studio (Live Recording Pill & Track Player) */}
         {(isRecording || audioNotes.length > 0) && (
           <View style={styles.audioStudioWrap}>
@@ -552,13 +821,13 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
               style={[
                 styles.contentTextEditor,
                 {
-                  color: activeColorConfig.text,
+                  color: effectiveTextColor,
                   fontSize: currentFontConfig.size,
                   lineHeight: currentFontConfig.lineHeight,
                 },
               ]}
               placeholder="메모를 작성하세요..."
-              placeholderTextColor={activeColorConfig.textMuted}
+              placeholderTextColor={effectiveMutedColor}
               value={content}
               onChangeText={setContent}
               multiline
@@ -590,7 +859,7 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
                         style={[
                           styles.contentTextRead,
                           {
-                            color: activeColorConfig.text,
+                            color: effectiveTextColor,
                             fontSize: currentFontConfig.size,
                             lineHeight: currentFontConfig.lineHeight,
                           },
@@ -608,7 +877,7 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
                       style={[
                         styles.contentTextRead,
                         {
-                          color: activeColorConfig.text,
+                          color: effectiveTextColor,
                           fontSize: currentFontConfig.size,
                           lineHeight: currentFontConfig.lineHeight,
                         },
@@ -627,7 +896,7 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
                   );
                 })()
               ) : (
-                <Text style={[styles.emptyContentHint, { color: activeColorConfig.textMuted }]}>
+                <Text style={[styles.emptyContentHint, { color: effectiveMutedColor }]}>
                   내용이 비어있습니다. 탭하여 메모 작성을 시작하세요...
                 </Text>
               )}
@@ -636,7 +905,7 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
         </ScrollView>
 
         {/* Bottom Status & Fast Tool Bar */}
-        <View style={[styles.bottomBar, { borderTopColor: activeColorConfig.cardBorder }]}>
+        <View style={[styles.bottomBar, { borderTopColor: activeColorConfig.cardBorder, backgroundColor: isDarkTemplate ? 'rgba(15,23,42,0.85)' : 'rgba(255,255,255,0.6)' }]}>
           {/* Quick Formatting Tools */}
           <View style={styles.quickTools}>
             {isEditMode ? (
@@ -646,8 +915,8 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
                   onPress={handleInsertBullet}
                   {...(Platform.OS === 'web' ? ({ onClick: handleInsertBullet } as any) : {})}
                 >
-                  <List size={14} color={activeColorConfig.text} />
-                  <Text style={[styles.toolPillText, { color: activeColorConfig.text }]}>
+                  <List size={14} color="#1E293B" />
+                  <Text style={[styles.toolPillText, { color: '#1E293B' }]}>
                     목록
                   </Text>
                 </TouchableOpacity>
@@ -657,8 +926,8 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
                   onPress={handleInsertDate}
                   {...(Platform.OS === 'web' ? ({ onClick: handleInsertDate } as any) : {})}
                 >
-                  <Calendar size={14} color={activeColorConfig.text} />
-                  <Text style={[styles.toolPillText, { color: activeColorConfig.text }]}>
+                  <Calendar size={14} color="#1E293B" />
+                  <Text style={[styles.toolPillText, { color: '#1E293B' }]}>
                     날짜 삽입
                   </Text>
                 </TouchableOpacity>
@@ -690,15 +959,27 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
               onPress={handleCycleFontSize}
               {...(Platform.OS === 'web' ? ({ onClick: handleCycleFontSize } as any) : {})}
             >
-              <Type size={13} color={activeColorConfig.text} />
-              <Text style={[styles.toolPillText, { color: activeColorConfig.text }]}>
+              <Type size={13} color="#1E293B" />
+              <Text style={[styles.toolPillText, { color: '#1E293B' }]}>
                 크기: {currentFontConfig.label}
+              </Text>
+            </TouchableOpacity>
+
+            {/* Metadata / Template / Tag / Sticker Toggle Button */}
+            <TouchableOpacity
+              style={[styles.toolPill, isMetaPanelOpen && styles.toolPillActive]}
+              onPress={() => setIsMetaPanelOpen(!isMetaPanelOpen)}
+              {...(Platform.OS === 'web' ? ({ onClick: () => setIsMetaPanelOpen(!isMetaPanelOpen) } as any) : {})}
+            >
+              <Sparkles size={13} color={isMetaPanelOpen ? '#2563EB' : '#1E293B'} />
+              <Text style={[styles.toolPillText, { color: isMetaPanelOpen ? '#2563EB' : '#1E293B' }]}>
+                속지·태그·꾸미기
               </Text>
             </TouchableOpacity>
           </View>
 
           {/* Word & Character Counter */}
-          <Text style={[styles.counterText, { color: activeColorConfig.textMuted }]}>
+          <Text style={[styles.counterText, { color: effectiveMutedColor }]}>
             글자 {charCount}자 • 단어 {wordCount}개
           </Text>
         </View>
@@ -822,12 +1103,138 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  colorDotPreview: {
-    width: 20,
-    height: 20,
+  metaPanel: {
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    borderBottomWidth: 1,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    gap: 8,
+  },
+  metaRowScroll: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  metaGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  metaGroupLabel: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    color: '#475569',
+    marginRight: 2,
+  },
+  metaChip: {
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  metaChipActive: {
+    backgroundColor: '#DBEAFE',
+    borderColor: '#3B82F6',
+  },
+  metaChipText: {
+    fontSize: 11.5,
+    fontWeight: '600',
+    color: '#475569',
+  },
+  metaChipTextActive: {
+    color: '#1D4ED8',
+    fontWeight: '700',
+  },
+  metaDivider: {
+    width: 1,
+    height: 18,
+    backgroundColor: '#CBD5E1',
+    marginHorizontal: 4,
+  },
+  metaTagStickerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  tagInputBox: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    gap: 6,
+  },
+  tagTextInput: {
+    flex: 1,
+    fontSize: 12.5,
+    color: '#1E293B',
+    padding: 0,
+  },
+  tagAddMiniBtn: {
+    backgroundColor: '#2563EB',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  tagAddMiniBtnText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  stickerOpenBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#F3E8FF',
+    borderWidth: 1,
+    borderColor: '#DDD6FE',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  stickerOpenBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#6D28D9',
+  },
+  activeBadgesStrip: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingTop: 8,
+  },
+  stickerBadgePill: {
+    backgroundColor: 'rgba(255,255,255,0.85)',
+    paddingHorizontal: 7,
+    paddingVertical: 3,
     borderRadius: 10,
-    borderWidth: 2,
-    borderColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.08)',
+  },
+  stickerBadgeEmoji: {
+    fontSize: 15,
+  },
+  tagBadgePill: {
+    backgroundColor: 'rgba(255,255,255,0.8)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.1)',
+  },
+  tagBadgeText: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    color: '#334155',
   },
   inNoteSearchBar: {
     flexDirection: 'row',
@@ -873,28 +1280,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     borderRadius: 2,
   },
-  colorPaletteStrip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-around',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    backgroundColor: 'rgba(255,255,255,0.92)',
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(0,0,0,0.06)',
-  },
-  colorChipBtn: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  colorChipBtnSelected: {
-    borderWidth: 2.5,
-    borderColor: '#0F172A',
-    transform: [{ scale: 1.15 }],
-  },
   audioStudioWrap: {
     paddingHorizontal: 16,
     paddingTop: 6,
@@ -905,7 +1290,7 @@ const styles = StyleSheet.create({
   scrollContent: {
     flexGrow: 1,
     paddingHorizontal: 18,
-    paddingTop: 16,
+    paddingTop: 14,
     paddingBottom: 40,
   },
   contentTextEditor: {
@@ -936,6 +1321,7 @@ const styles = StyleSheet.create({
   quickTools: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexWrap: 'wrap',
     gap: 8,
   },
   editModeSwitchBtn: {
@@ -959,9 +1345,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 9,
     paddingVertical: 6,
     borderRadius: 8,
-    backgroundColor: 'rgba(255,255,255,0.7)',
+    backgroundColor: 'rgba(255,255,255,0.88)',
     borderWidth: 1,
     borderColor: 'rgba(0,0,0,0.08)',
+  },
+  toolPillActive: {
+    backgroundColor: '#EFF6FF',
+    borderColor: '#93C5FD',
   },
   toolPillText: {
     fontSize: 12,

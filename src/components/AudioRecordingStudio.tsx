@@ -133,15 +133,15 @@ export const AudioRecordingStudio: React.FC<AudioRecordingStudioProps> = ({
             <Text style={styles.recLabel}>REC</Text>
             <Text style={styles.recTimer}>{formatTime(seconds)}</Text>
 
-            {/* 음성 파형 시뮬레이션 바 */}
+            {/* 음성 파형 시뮬레이션 바 (고정 높이, 색상만 강조) */}
             <View style={styles.waveformContainer}>
-              {[12, 24, 18, 28, 16, 22, 14, 26, 18].map((h, i) => (
+              {[10, 18, 14, 20, 12, 16, 11, 19, 13].map((h, i) => (
                 <View
                   key={i}
                   style={[
                     styles.waveBar,
                     {
-                      height: (h * (0.6 + (seconds % 3) * 0.2)),
+                      height: h,
                       backgroundColor: '#EF4444',
                     },
                   ]}

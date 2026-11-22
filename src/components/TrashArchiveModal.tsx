@@ -187,7 +187,11 @@ export const TrashArchiveModal: React.FC<Props> = ({
                         </Text>
                       </View>
 
-                      {note.content ? (
+                      {note.isLocked ? (
+                        <Text style={[styles.noteBody, { color: color.textMuted, fontStyle: 'italic' }]}>
+                          🔒 비밀번호로 보호된 메모
+                        </Text>
+                      ) : note.content ? (
                         <Text style={[styles.noteBody, { color: color.text }]} numberOfLines={2}>
                           {note.content}
                         </Text>
@@ -242,7 +246,11 @@ export const TrashArchiveModal: React.FC<Props> = ({
                         </Text>
                       </View>
 
-                      {note.content ? (
+                      {note.isLocked ? (
+                        <Text style={[styles.noteBody, { color: color.textMuted, fontStyle: 'italic' }]}>
+                          🔒 비밀번호로 보호된 메모
+                        </Text>
+                      ) : note.content ? (
                         <Text style={[styles.noteBody, { color: color.text }]} numberOfLines={2}>
                           {note.content}
                         </Text>

@@ -62,13 +62,15 @@ export const Header: React.FC<HeaderProps> = ({ onOpenBackupModal }) => {
 
   const [isAddBoardModalOpen, setIsAddBoardModalOpen] = useState(false);
   const [newBoardName, setNewBoardName] = useState('');
+  const [selectedBoardIcon, setSelectedBoardIcon] = useState<string>('Folder');
 
   const deletedCount = notes.filter((n) => n.isDeleted).length;
 
   const handleCreateBoard = () => {
     if (!newBoardName.trim()) return;
-    addBoard(newBoardName.trim());
+    addBoard(newBoardName.trim(), selectedBoardIcon);
     setNewBoardName('');
+    setSelectedBoardIcon('Folder');
     setIsAddBoardModalOpen(false);
   };
 
@@ -202,25 +204,38 @@ export const Header: React.FC<HeaderProps> = ({ onOpenBackupModal }) => {
             const isActive = activeBoardId === b.id;
             const IconComponent = BOARD_ICONS[b.icon] || Folder;
             return (
-              <TouchableOpacity
+              <View
                 key={b.id}
                 style={[styles.boardTab, isActive && styles.boardTabActive]}
-                onPress={() => setActiveBoardId(b.id)}
-                activeOpacity={0.7}
               >
-                <IconComponent
-                  size={14}
-                  color={isActive ? '#FFFFFF' : '#64748B'}
-                />
-                <Text
-                  style={[
-                    styles.boardTabText,
-                    isActive && styles.boardTabTextActive,
-                  ]}
+                <TouchableOpacity
+                  style={styles.boardTabTouchInner}
+                  onPress={() => setActiveBoardId(b.id)}
+                  activeOpacity={0.7}
                 >
-                  {b.name}
-                </Text>
-              </TouchableOpacity>
+                  <IconComponent
+                    size={14}
+                    color={isActive ? '#FFFFFF' : '#64748B'}
+                  />
+                  <Text
+                    style={[
+                      styles.boardTabText,
+                      isActive && styles.boardTabTextActive,
+                    ]}
+                  >
+                    {b.name}
+                  </Text>
+                </TouchableOpacity>
+                {b.id.startsWith('board_') && (
+                  <TouchableOpacity
+                    style={styles.deleteBoardMiniBtn}
+                    onPress={() => deleteBoard(b.id)}
+                    hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                  >
+                    <X size={12} color={isActive ? '#CBD5E1' : '#94A3B8'} />
+                  </TouchableOpacity>
+                )}
+              </View>
             );
           })}
 
@@ -258,8 +273,27 @@ export const Header: React.FC<HeaderProps> = ({ onOpenBackupModal }) => {
               placeholderTextColor="#94A3B8"
               value={newBoardName}
               onChangeText={setNewBoardName}
+              onSubmitEditing={handleCreateBoard}
               autoFocus
             />
+
+            <Text style={styles.iconPickerLabel}>보드 아이콘 선택</Text>
+            <View style={styles.iconPickerRow}>
+              {Object.keys(BOARD_ICONS).map((iconKey) => {
+                const IconComp = BOARD_ICONS[iconKey];
+                const isSelected = selectedBoardIcon === iconKey;
+                return (
+                  <TouchableOpacity
+                    key={iconKey}
+                    style={[styles.iconPickerOption, isSelected && styles.iconPickerOptionActive]}
+                    onPress={() => setSelectedBoardIcon(iconKey)}
+                  >
+                    <IconComp size={18} color={isSelected ? '#2563EB' : '#64748B'} />
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
             <View style={styles.modalActions}>
               <TouchableOpacity
                 style={styles.cancelBtn}
@@ -409,6 +443,15 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     backgroundColor: '#F8FAFC',
   },
+  boardTabTouchInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  deleteBoardMiniBtn: {
+    marginLeft: 2,
+    padding: 2,
+  },
   boardTabActive: {
     backgroundColor: '#0F172A',
   },
@@ -476,7 +519,34 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     fontSize: 14,
     color: '#0F172A',
+    marginBottom: 14,
+  },
+  iconPickerLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#64748B',
+    marginBottom: 8,
+  },
+  iconPickerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
     marginBottom: 18,
+  },
+  iconPickerOption: {
+    width: 38,
+    height: 38,
+    borderRadius: 10,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  iconPickerOptionActive: {
+    backgroundColor: '#EFF6FF',
+    borderColor: '#3B82F6',
+    borderWidth: 1.5,
   },
   modalActions: {
     flexDirection: 'row',

@@ -68,6 +68,18 @@ export const SearchBar: React.FC = () => {
         let field: 'title' | 'content' | 'checklist' | 'tag' | 'audio' | null = null;
         let snippet = '';
 
+        if (note.isLocked) {
+          if (note.title && note.title.toLowerCase().includes(q)) {
+            field = 'title';
+            snippet = '🔒 비밀번호로 보호된 메모';
+          } else if (note.tags && note.tags.some((t) => t.toLowerCase().includes(q))) {
+            field = 'tag';
+            snippet = `🔒 잠긴 메모 • 태그: #${note.tags.join(' #')}`;
+          }
+          if (!field) return null;
+          return { note, field, snippet };
+        }
+
         if (note.title && note.title.toLowerCase().includes(q)) {
           field = 'title';
           snippet = note.title;

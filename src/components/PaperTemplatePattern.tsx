@@ -6,13 +6,14 @@ import { PaperTemplate } from '../types/note';
 interface PaperTemplatePatternProps {
   template?: PaperTemplate;
   colorHex?: string;
+  lineSpacing?: number;
   style?: object;
 }
 
 /**
  * Noteshelf & DrawNote 스타일 유니버설 페이퍼 속지 템플릿 패턴 엔진 (Mobile & Web 동시 지원)
  * - blank: 깨끗한 단색 무지
- * - lined: 은은한 가로 줄노트 (28px 간격)
+ * - lined: 은은한 가로 줄노트 (기본 28px 간격, 폰트 lineHeight 연동 지원)
  * - grid: 모눈종이 방안 격자 (24px x 24px)
  * - dot: 불렛 저널 도트 매트릭스 (20px 간격)
  * - cornell: 코넬식 단서/본문/요약 3분할 노트 (좌측 28% 레드 마진 라인)
@@ -21,11 +22,14 @@ interface PaperTemplatePatternProps {
 export const PaperTemplatePattern: React.FC<PaperTemplatePatternProps> = ({
   template = 'blank',
   colorHex = '#0F172A',
+  lineSpacing = 28,
   style,
 }) => {
   if (template === 'blank') {
     return null;
   }
+
+  const gap = Math.max(18, Math.round(lineSpacing));
 
   // 웹 환경: CSS 그라디언트를 사용한 초경량 렌더링
   if (Platform.OS === 'web') {
@@ -35,11 +39,11 @@ export const PaperTemplatePattern: React.FC<PaperTemplatePatternProps> = ({
       backgroundStyle = {
         backgroundImage: `repeating-linear-gradient(
           transparent,
-          transparent 27px,
-          rgba(15, 23, 42, 0.08) 27px,
-          rgba(15, 23, 42, 0.08) 28px
+          transparent ${gap - 1}px,
+          rgba(15, 23, 42, 0.08) ${gap - 1}px,
+          rgba(15, 23, 42, 0.08) ${gap}px
         )`,
-        backgroundPosition: '0 8px',
+        backgroundPosition: '0 14px',
       };
     } else if (template === 'grid') {
       backgroundStyle = {
@@ -60,12 +64,12 @@ export const PaperTemplatePattern: React.FC<PaperTemplatePatternProps> = ({
           linear-gradient(to right, transparent 28%, rgba(225, 29, 72, 0.22) 28%, rgba(225, 29, 72, 0.22) 29%, transparent 29%),
           repeating-linear-gradient(
             transparent,
-            transparent 27px,
-            rgba(15, 23, 42, 0.08) 27px,
-            rgba(15, 23, 42, 0.08) 28px
+            transparent ${gap - 1}px,
+            rgba(15, 23, 42, 0.08) ${gap - 1}px,
+            rgba(15, 23, 42, 0.08) ${gap}px
           )
         `,
-        backgroundPosition: '0 8px',
+        backgroundPosition: '0 14px',
       };
     } else if (template === 'dark') {
       backgroundStyle = {
@@ -113,8 +117,8 @@ export const PaperTemplatePattern: React.FC<PaperTemplatePatternProps> = ({
       <Svg width="100%" height="100%">
         <Defs>
           {template === 'lined' && (
-            <Pattern id="linedPattern" width="100%" height="28" patternUnits="userSpaceOnUse">
-              <Line x1="0" y1="27" x2="100%" y2="27" stroke="rgba(15, 23, 42, 0.08)" strokeWidth="1" />
+            <Pattern id="linedPattern" width="100%" height={String(gap)} patternUnits="userSpaceOnUse">
+              <Line x1="0" y1={String(gap - 1)} x2="100%" y2={String(gap - 1)} stroke="rgba(15, 23, 42, 0.08)" strokeWidth="1" />
             </Pattern>
           )}
           {(template === 'grid' || template === 'dark') && (
@@ -134,8 +138,8 @@ export const PaperTemplatePattern: React.FC<PaperTemplatePatternProps> = ({
             </Pattern>
           )}
           {template === 'cornell' && (
-            <Pattern id="cornellPattern" width="100%" height="28" patternUnits="userSpaceOnUse">
-              <Line x1="0" y1="27" x2="100%" y2="27" stroke="rgba(15, 23, 42, 0.08)" strokeWidth="1" />
+            <Pattern id="cornellPattern" width="100%" height={String(gap)} patternUnits="userSpaceOnUse">
+              <Line x1="0" y1={String(gap - 1)} x2="100%" y2={String(gap - 1)} stroke="rgba(15, 23, 42, 0.08)" strokeWidth="1" />
             </Pattern>
           )}
         </Defs>

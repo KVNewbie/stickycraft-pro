@@ -24,6 +24,8 @@ import {
   Moon,
   Sparkles,
   ShieldCheck,
+  Volume2,
+  PenTool,
 } from 'lucide-react-native';
 import { useNoteStore } from '../store/useNoteStore';
 import {
@@ -32,6 +34,7 @@ import {
   getAutoBackupHistory,
   BackupSnapshotMeta,
 } from '../utils/autoBackup';
+import { playWritingSoundPreview } from '../utils/writingSound';
 import { LunarDisplayMode } from '../types/note';
 
 interface BackupSettingsModalProps {
@@ -52,6 +55,8 @@ export const BackupSettingsModal: React.FC<BackupSettingsModalProps> = ({
     setLunarDisplayMode,
     autoBackupEnabled,
     setAutoBackupEnabled,
+    writingSoundEnabled,
+    setWritingSoundEnabled,
   } = useNoteStore();
 
   const [jsonText, setJsonText] = useState('');
@@ -240,6 +245,53 @@ export const BackupSettingsModal: React.FC<BackupSettingsModalProps> = ({
             <View style={styles.statsCard}>
               <Text style={styles.statsLabel}>현재 저장된 총 메모</Text>
               <Text style={styles.statsNumber}>{notes.length}개</Text>
+            </View>
+
+            {/* SECTION 0: 필기 사각사각 효과음 (Paper ASMR Sound) ON/OFF 설정 */}
+            <View style={styles.sectionCard}>
+              <View style={styles.sectionHeaderRow}>
+                <View style={styles.sectionHeader}>
+                  <PenTool size={16} color="#D97706" />
+                  <Text style={styles.sectionTitle}>필기 사각사각 효과음 (ASMR)</Text>
+                </View>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <TouchableOpacity
+                    style={[
+                      styles.toggleBtn,
+                      { backgroundColor: '#FEF3C7', borderColor: '#FCD34D' },
+                    ]}
+                    onPress={() => {
+                      playWritingSoundPreview();
+                      showStatus('🔊 종이 필기 사각사각 효과음 미리듣기');
+                    }}
+                  >
+                    <Text style={[styles.toggleBtnText, { color: '#B45309' }]}>
+                      🔊 미리듣기
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.toggleBtn, writingSoundEnabled && styles.toggleBtnActive]}
+                    onPress={() => {
+                      const next = !writingSoundEnabled;
+                      setWritingSoundEnabled(next);
+                      if (next) {
+                        playWritingSoundPreview();
+                        showStatus('✏️ 필기 사각사각 효과음이 켜졌습니다 (ON)');
+                      } else {
+                        showStatus('🔇 필기 사각사각 효과음이 꺼졌습니다 (OFF)');
+                      }
+                    }}
+                  >
+                    <Text style={[styles.toggleBtnText, writingSoundEnabled && styles.toggleBtnTextActive]}>
+                      {writingSoundEnabled ? '효과음 ON' : '효과음 OFF'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+              <Text style={styles.sectionDesc}>
+                PDF 문서, 손글씨 캔버스, 화이트보드에서 펜·만년필·형광펜으로 필기할 때 실제 종이에 쓰는 듯한 사각사각 마찰음을 초저지연(60fps 무끊김)으로 재생합니다.
+              </Text>
             </View>
 
             {/* SECTION 1: 환경설정 - 달력 음력 날짜 표시 설정 (Select Mode) */}

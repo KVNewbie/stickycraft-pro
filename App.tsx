@@ -51,6 +51,7 @@ export default function App() {
     snoozeAlarm,
     dismissAlarm,
     openEditNoteEditor,
+    openLockModal,
     checkPendingAlarms,
   } = useNoteStore();
 
@@ -169,7 +170,11 @@ export default function App() {
           }}
           onOpenNote={(note) => {
             dismissAlarm(note.id);
-            openEditNoteEditor(note);
+            if (note.isLocked) {
+              openLockModal(note, () => openEditNoteEditor(note));
+            } else {
+              openEditNoteEditor(note);
+            }
           }}
         />
       </SafeAreaView>
