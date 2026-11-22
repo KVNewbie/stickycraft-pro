@@ -1568,43 +1568,62 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
     setTimeout(() => setExportToastMessage(null), 1800);
   };
 
-  // Adobe Acrobat 페이지 구성: 페이지 순서 앞뒤 맞바꾸기 (필기/텍스트/오디오/회전 동기 이동)
+  // Adobe Acrobat 페이지 구성: 드래그 앤 드롭 및 화살표를 통한 임의 위치 페이지 이동 (필기/텍스트/오디오/스탬프/먹칠/댓글/회전 동기 이동)
   const handleMovePage = (fromPage: number, toPage: number) => {
-    if (fromPage === toPage || toPage < 1 || toPage > totalPages) return;
-    setPdfPages((prev) => {
-      const next = [...prev];
-      const temp = next[fromPage - 1];
-      next[fromPage - 1] = next[toPage - 1];
-      next[toPage - 1] = temp;
-      return next.map((p, idx) => ({ ...p, pageNumber: idx + 1 }));
+    if (fromPage === toPage || fromPage < 1 || fromPage > totalPages || toPage < 1 || toPage > totalPages) return;
+
+    const oldOrder = Array.from({ length: totalPages }, (_, i) => i + 1);
+    const [movedOldNum] = oldOrder.splice(fromPage - 1, 1);
+    oldOrder.splice(toPage - 1, 0, movedOldNum);
+
+    const oldToNewMap = new Map<number, number>();
+    oldOrder.forEach((oldNum, idx) => {
+      oldToNewMap.set(oldNum, idx + 1);
     });
 
-    const swapIndex = (idx?: number) => {
-      const p = idx || 1;
-      if (p === fromPage) return toPage;
-      if (p === toPage) return fromPage;
-      return p;
-    };
+    setPdfPages((prev) => {
+      if (prev.length < totalPages) return prev;
+      return oldOrder.map((oldNum, idx) => ({
+        ...prev[oldNum - 1],
+        pageNumber: idx + 1,
+      }));
+    });
 
-    const swappedStrokes = strokesRef.current.map((s) => ({
+    const remapIdx = (idx?: number) => oldToNewMap.get(idx || 1) || (idx || 1);
+
+    const reorderedStrokes = strokesRef.current.map((s) => ({
       ...s,
-      pageIndex: swapIndex(s.pageIndex),
+      pageIndex: remapIdx(s.pageIndex),
     }));
-    strokesRef.current = swappedStrokes;
-    setStrokes(swappedStrokes);
+    strokesRef.current = reorderedStrokes;
+    setStrokes(reorderedStrokes);
 
-    setTextBoxes((prev) => prev.map((t) => ({ ...t, pageIndex: swapIndex(t.pageIndex) })));
-    setAudioNotes((prev) => prev.map((a) => ({ ...a, pageIndex: swapIndex(a.pageIndex) })));
+    setTextBoxes((prev) => prev.map((t) => ({ ...t, pageIndex: remapIdx(t.pageIndex) })));
+    setAudioNotes((prev) => prev.map((a) => ({ ...a, pageIndex: remapIdx(a.pageIndex) })));
+    setPdfStamps((prev) => prev.map((st) => ({ ...st, pageIndex: remapIdx(st.pageIndex) })));
+    setPdfRedactions((prev) => prev.map((r) => ({ ...r, pageIndex: remapIdx(r.pageIndex) })));
+    setPdfComments((prev) => prev.map((c) => ({ ...c, pageIndex: remapIdx(c.pageIndex) })));
     setPageRotations((prev) => {
-      const next = { ...prev };
-      const rFrom = prev[fromPage] || 0;
-      const rTo = prev[toPage] || 0;
-      next[fromPage] = rTo;
-      next[toPage] = rFrom;
+      const next: Record<number, number> = {};
+      Object.entries(prev).forEach(([k, rot]) => {
+        const mapped = oldToNewMap.get(Number(k));
+        if (mapped) next[mapped] = rot;
+      });
       return next;
     });
+    setPageTemplates((prev) => {
+      const next: Record<number, PaperTemplate> = {};
+      Object.entries(prev).forEach(([k, tpl]) => {
+        const mapped = oldToNewMap.get(Number(k));
+        if (mapped) next[mapped] = tpl;
+      });
+      return next;
+    });
+    setBookmarkedPages((prev) =>
+      prev.map((p) => oldToNewMap.get(p) || p).sort((a, b) => a - b)
+    );
     setCurrentPage(toPage);
-    setExportToastMessage(`🗂️ P.${fromPage} ↔ P.${toPage} 페이지 순서가 변경되었습니다.`);
+    setExportToastMessage(`🗂️ P.${fromPage} → P.${toPage} 위치로 페이지가 이동되었습니다.`);
     setTimeout(() => setExportToastMessage(null), 1800);
   };
 
@@ -1656,24 +1675,34 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
     setTimeout(() => setExportToastMessage(null), 1800);
   };
 
-  // Adobe Acrobat 스타일 PDF 병합 (Merge / Combine PDF)
+  // Adobe Acrobat 스타일 PDF 병합 및 다른 PDF 페이지 복사·드래그 삽입 (Merge / Copy-Paste Pages)
   const handleMergePages = (
     incomingPages: PdfPageData[],
     sourceNote: Note | null,
-    position: 'append' | 'prepend' | 'after_current'
+    position: 'append' | 'prepend' | 'after_current',
+    customInsertIndex?: number,
+    selectedSourcePageNums?: number[]
   ) => {
     if (!incomingPages || incomingPages.length === 0) return;
     const count = incomingPages.length;
     const insertIndex =
-      position === 'prepend'
+      typeof customInsertIndex === 'number'
+        ? Math.max(0, Math.min(pdfPages.length, customInsertIndex))
+        : position === 'prepend'
         ? 0
         : position === 'after_current'
         ? Math.min(pdfPages.length, currentPage)
         : pdfPages.length;
 
+    const clonedIncoming = incomingPages.map((p, idx) => ({
+      ...p,
+      id: `pdfp_ins_${Date.now()}_${idx + 1}_${Math.random().toString(36).substring(2, 6)}`,
+      sourcePdfName: p.sourcePdfName || sourceNote?.title || sourceNote?.pdfName || '외부 PDF',
+    }));
+
     const nextPages = [
       ...pdfPages.slice(0, insertIndex),
-      ...incomingPages,
+      ...clonedIncoming,
       ...pdfPages.slice(insertIndex),
     ].map((p, idx) => ({ ...p, pageNumber: idx + 1 }));
 
@@ -1699,30 +1728,58 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
       pageIndex: shiftExisting(a.pageIndex),
     }));
 
-    // 병합 원본 노트에 있던 필기/텍스트/오디오도 페이지 번호를 맞춰 함께 병합
+    setPdfStamps((prev) => prev.map((st) => ({ ...st, pageIndex: shiftExisting(st.pageIndex) })));
+    setPdfRedactions((prev) => prev.map((r) => ({ ...r, pageIndex: shiftExisting(r.pageIndex) })));
+    setPdfComments((prev) => prev.map((c) => ({ ...c, pageIndex: shiftExisting(c.pageIndex) })));
+    setPageRotations((prev) => {
+      const next: Record<number, number> = {};
+      Object.entries(prev).forEach(([k, rot]) => {
+        next[shiftExisting(Number(k))] = rot;
+      });
+      return next;
+    });
+
+    // 병합/복사 원본 노트에 있던 필기/텍스트/오디오도 선택된 페이지 매핑에 맞춰 함께 복사
     if (sourceNote) {
+      const srcPageToNewPage = new Map<number, number>();
+      if (selectedSourcePageNums && selectedSourcePageNums.length === count) {
+        selectedSourcePageNums.forEach((origPageNum, idx) => {
+          srcPageToNewPage.set(origPageNum, insertIndex + idx + 1);
+        });
+      } else {
+        for (let i = 1; i <= count; i++) {
+          srcPageToNewPage.set(i, insertIndex + i);
+        }
+      }
+
       if (sourceNote.strokes && sourceNote.strokes.length > 0) {
-        const incomingStrokes: StrokeWithPage[] = sourceNote.strokes.map((s) => ({
-          ...s,
-          id: `strk_m_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-          pageIndex: (s.pageIndex || 1) + insertIndex,
-        }));
+        const incomingStrokes: StrokeWithPage[] = sourceNote.strokes
+          .filter((s) => srcPageToNewPage.has(s.pageIndex || 1))
+          .map((s) => ({
+            ...s,
+            id: `strk_m_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            pageIndex: srcPageToNewPage.get(s.pageIndex || 1) || insertIndex + 1,
+          }));
         mergedStrokes = [...mergedStrokes, ...incomingStrokes];
       }
       if (sourceNote.textBoxes && sourceNote.textBoxes.length > 0) {
-        const incomingBoxes: FreeTextBox[] = sourceNote.textBoxes.map((t) => ({
-          ...t,
-          id: `tb_m_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-          pageIndex: (t.pageIndex || 1) + insertIndex,
-        }));
+        const incomingBoxes: FreeTextBox[] = sourceNote.textBoxes
+          .filter((t) => srcPageToNewPage.has(t.pageIndex || 1))
+          .map((t) => ({
+            ...t,
+            id: `tb_m_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            pageIndex: srcPageToNewPage.get(t.pageIndex || 1) || insertIndex + 1,
+          }));
         mergedTextBoxes = [...mergedTextBoxes, ...incomingBoxes];
       }
       if (sourceNote.audioNotes && sourceNote.audioNotes.length > 0) {
-        const incomingAudios: AudioNote[] = sourceNote.audioNotes.map((a) => ({
-          ...a,
-          id: `aud_m_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-          pageIndex: (a.pageIndex || 1) + insertIndex,
-        }));
+        const incomingAudios: AudioNote[] = sourceNote.audioNotes
+          .filter((a) => srcPageToNewPage.has(a.pageIndex || 1))
+          .map((a) => ({
+            ...a,
+            id: `aud_m_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            pageIndex: srcPageToNewPage.get(a.pageIndex || 1) || insertIndex + 1,
+          }));
         mergedAudios = [...mergedAudios, ...incomingAudios];
       }
     }
@@ -1734,9 +1791,9 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
     setCurrentPage(insertIndex + 1);
     setPdfWorkspaceTab('organize');
     setExportToastMessage(
-      `📑 ${count}페이지가 병합되었습니다! (현재 총 ${nextPages.length}페이지)`
+      `📑 P.${insertIndex + 1} 위치에 ${count}페이지가 삽입되었습니다! (총 ${nextPages.length}페이지 · 드래그하여 위치 이동 가능)`
     );
-    setTimeout(() => setExportToastMessage(null), 2800);
+    setTimeout(() => setExportToastMessage(null), 3000);
   };
 
   // Adobe Acrobat 스타일 PDF 분할 및 추출 (Split / Extract PDF)

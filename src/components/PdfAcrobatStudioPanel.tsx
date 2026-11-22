@@ -486,6 +486,17 @@ export const PdfOpenLauncherView: React.FC<PdfOpenLauncherProps> = ({
   );
 };
 
+export interface PdfPageClipboardItem {
+  sourceTitle: string;
+  sourceNote: Note | null;
+  pages: PdfPageData[];
+  sourcePageNums: number[];
+  copiedAt: number;
+}
+
+// 앱 내 모든 PDF 문서 간 공유되는 페이지 클립보드 (메모리 + 웹 전역 유지)
+let sharedPdfPageClipboard: PdfPageClipboardItem | null = null;
+
 interface PdfAcrobatStudioPanelProps {
   mode: 'organize' | 'merge' | 'split';
   title: string;
@@ -504,7 +515,9 @@ interface PdfAcrobatStudioPanelProps {
   onMergePages: (
     newPages: PdfPageData[],
     sourceNote: Note | null,
-    position: 'append' | 'prepend' | 'after_current'
+    position: 'append' | 'prepend' | 'after_current',
+    customInsertIndex?: number,
+    selectedSourcePageNums?: number[]
   ) => void;
   onSplitPages: (selectedPageNums: number[], removeOriginalPages: boolean, newDocTitle: string) => void;
   onBatchRotatePages?: (pageNums: number[]) => void;
@@ -539,6 +552,8 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
   // 병합(Merge) 상태
   const [mergePosition, setMergePosition] = useState<'append' | 'prepend' | 'after_current'>('append');
   const [isMergeLoading, setIsMergeLoading] = useState(false);
+  const [expandedMergeNoteId, setExpandedMergeNoteId] = useState<string | null>(null);
+  const [selectedMergePageMap, setSelectedMergePageMap] = useState<Record<string, number[]>>({});
 
   // 페이지 구성(Organize) 다중 선택 & 썸네일 크기 상태
   const [orgSelected, setOrgSelected] = useState<number[]>([]);
@@ -546,10 +561,119 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
   const thumbCardWidth = thumbSize === 'sm' ? 170 : thumbSize === 'lg' ? 310 : 235;
   const thumbSheetHeight = thumbSize === 'sm' ? 120 : thumbSize === 'lg' ? 300 : 170;
 
+  // 문서 간 페이지 복사 클립보드 & 다른 PDF에서 페이지 가져와 넣기 트레이 상태
+  const [pageClipboard, setPageClipboard] = useState<PdfPageClipboardItem | null>(
+    () => sharedPdfPageClipboard
+  );
+  const [isExternalPickerOpen, setIsExternalPickerOpen] = useState(false);
+  const [externalSourceNoteId, setExternalSourceNoteId] = useState<string | null>(null);
+  const [uploadedExternalDoc, setUploadedExternalDoc] = useState<{
+    title: string;
+    pages: PdfPageData[];
+  } | null>(null);
+  const [externalSelectedPages, setExternalSelectedPages] = useState<number[]>([]);
+  const [externalInsertTargetIdx, setExternalInsertTargetIdx] = useState<number>(pdfPages.length);
+
+  // 드래그 앤 드롭 페이지 순서 변경 / 외부 PDF 페이지 드래그 삽입 상태
+  const [draggingPageNum, setDraggingPageNum] = useState<number | null>(null);
+  const [draggingExternalPage, setDraggingExternalPage] = useState<{
+    page: PdfPageData;
+    pageNumber: number;
+    sourceNote: Note | null;
+  } | null>(null);
+  const [dragOverPageNum, setDragOverPageNum] = useState<number | null>(null);
+
   const toggleOrgSelect = (pNum: number) => {
     setOrgSelected((prev) =>
       prev.includes(pNum) ? prev.filter((p) => p !== pNum) : [...prev, pNum].sort((a, b) => a - b)
     );
+  };
+
+  // 현재 PDF에서 선택한 페이지(또는 특정 페이지)를 문서 간 페이지 클립보드에 복사
+  const handleCopyPagesToClipboard = (targetPageNums: number[]) => {
+    const nums =
+      targetPageNums.length > 0
+        ? [...targetPageNums].sort((a, b) => a - b)
+        : [currentPage || 1];
+    const copiedPages = nums
+      .map((n) => pdfPages[n - 1])
+      .filter(Boolean)
+      .map((p) => ({
+        ...p,
+        sourcePdfName: p.sourcePdfName || title,
+      }));
+    if (copiedPages.length === 0) return;
+    const currentNoteObj = allNotes.find((n) => n.id === currentNoteId) || null;
+    const item: PdfPageClipboardItem = {
+      sourceTitle: title,
+      sourceNote: currentNoteObj,
+      pages: copiedPages,
+      sourcePageNums: nums,
+      copiedAt: Date.now(),
+    };
+    sharedPdfPageClipboard = item;
+    setPageClipboard(item);
+  };
+
+  // 클립보드에 복사된 페이지를 현재 PDF 원하는 위치에 붙여넣기
+  const handlePastePagesFromClipboard = (insertAfterPageNum?: number) => {
+    const clip = sharedPdfPageClipboard || pageClipboard;
+    if (!clip || clip.pages.length === 0) return;
+    const insertIdx =
+      typeof insertAfterPageNum === 'number'
+        ? insertAfterPageNum
+        : orgSelected.length > 0
+        ? Math.max(...orgSelected)
+        : pdfPages.length;
+    onMergePages(clip.pages, clip.sourceNote, 'append', insertIdx, clip.sourcePageNums);
+  };
+
+  // 외부 로컬 .pdf 파일을 트레이로 불러와 원하는 페이지만 골라 넣기
+  const handleLoadExternalPdfIntoTray = () => {
+    if (Platform.OS === 'web' && typeof document !== 'undefined') {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'application/pdf,.pdf';
+      input.onchange = async (e: any) => {
+        const file: File | undefined = e.target?.files?.[0];
+        if (!file) return;
+        setIsMergeLoading(true);
+        try {
+          const parsed = await parseUploadedPdfFile(file);
+          setUploadedExternalDoc({
+            title: parsed.fileName,
+            pages: parsed.pages,
+          });
+          setExternalSourceNoteId('__uploaded__');
+          setExternalSelectedPages(parsed.pages.map((_, idx) => idx + 1));
+        } finally {
+          setIsMergeLoading(false);
+        }
+      };
+      input.click();
+    }
+  };
+
+  // 드래그 앤 드롭 완료 처리 (내부 페이지 순서 이동 또는 다른 PDF 페이지 원하는 슬롯에 삽입)
+  const handleFinalizeDropOnPage = (targetPageNum: number) => {
+    if (draggingExternalPage) {
+      // 다른 PDF에서 드래그한 페이지를 targetPageNum 위치(즉 targetPageNum - 1 인덱스)에 삽입
+      onMergePages(
+        [draggingExternalPage.page],
+        draggingExternalPage.sourceNote,
+        'append',
+        Math.max(0, targetPageNum - 1),
+        [draggingExternalPage.pageNumber]
+      );
+      setDraggingExternalPage(null);
+      setDragOverPageNum(null);
+      return;
+    }
+    if (draggingPageNum !== null && draggingPageNum !== targetPageNum) {
+      onMovePage(draggingPageNum, targetPageNum);
+    }
+    setDraggingPageNum(null);
+    setDragOverPageNum(null);
   };
 
   // 분할(Split) 상태
@@ -627,6 +751,25 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
 
   const mergeableNotes = allNotes.filter((n) => !n.isDeleted && n.id !== currentNoteId);
 
+  const activeExternalNote =
+    externalSourceNoteId && externalSourceNoteId !== '__uploaded__'
+      ? mergeableNotes.find((n) => n.id === externalSourceNoteId) || null
+      : null;
+
+  const activeExternalPages: PdfPageData[] =
+    externalSourceNoteId === '__uploaded__' && uploadedExternalDoc
+      ? uploadedExternalDoc.pages
+      : activeExternalNote
+      ? extractPdfPagesFromNote(activeExternalNote)
+      : [];
+
+  const activeExternalTitle =
+    externalSourceNoteId === '__uploaded__' && uploadedExternalDoc
+      ? uploadedExternalDoc.title
+      : activeExternalNote
+      ? activeExternalNote.title || activeExternalNote.pdfName || '다른 PDF 문서'
+      : '';
+
   // 실제 PDF 렌더링 이미지 or 텍스트 기반 미니 시트 공용 렌더러
   const renderMiniSheet = (p: PdfPageData, rot: number, height: number) => (
     <View
@@ -670,22 +813,48 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
           <View style={styles.studioBanner}>
             <View style={{ flex: 1 }}>
               <Text style={styles.studioBannerTitle}>
-                🗂️ 페이지 구성 및 정렬 (총 {pdfPages.length}페이지)
+                🗂️ 페이지 구성 · 드래그 정렬 · 다른 PDF 페이지 복사/삽입 (총 {pdfPages.length}페이지)
               </Text>
               <Text style={styles.studioBannerDesc}>
-                체크박스로 여러 페이지를 선택해 일괄 회전·삭제·추출하거나, 각 페이지의 순서 이동·복제·삽입을 수행하세요. 썸네일을 클릭하면 필기 화면으로 이동합니다.
+                카드를 드래그 앤 드롭(⠿)하여 페이지 위치를 자유롭게 바꾸거나, 다른 PDF에서 원하는 페이지만 복사·드래그해 현재 문서의 원하는 위치에 넣을 수 있습니다.
               </Text>
             </View>
-            <TouchableOpacity
-              style={styles.bannerAddBtn}
-              onPress={() => onInsertBlankPageAfter(pdfPages.length)}
-            >
-              <Plus size={15} color="#FFFFFF" />
-              <Text style={styles.bannerAddBtnText}>맨 뒤에 페이지 추가</Text>
-            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <TouchableOpacity
+                style={[
+                  styles.bannerImportBtn,
+                  isExternalPickerOpen && { backgroundColor: '#4F46E5' },
+                ]}
+                onPress={() => {
+                  const nextOpen = !isExternalPickerOpen;
+                  setIsExternalPickerOpen(nextOpen);
+                  if (nextOpen && !externalSourceNoteId && mergeableNotes.length > 0) {
+                    const first = mergeableNotes[0];
+                    setExternalSourceNoteId(first.id);
+                    const pages = extractPdfPagesFromNote(first);
+                    setExternalSelectedPages(pages.map((_, idx) => idx + 1));
+                  }
+                }}
+              >
+                <FolderPlus size={15} color="#FFFFFF" />
+                <Text style={styles.bannerAddBtnText}>
+                  {isExternalPickerOpen
+                    ? '다른 PDF 트레이 닫기'
+                    : '📂 다른 PDF에서 페이지 가져와 넣기'}
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.bannerAddBtn}
+                onPress={() => onInsertBlankPageAfter(pdfPages.length)}
+              >
+                <Plus size={15} color="#FFFFFF" />
+                <Text style={styles.bannerAddBtnText}>맨 뒤에 빈 페이지</Text>
+              </TouchableOpacity>
+            </View>
           </View>
 
-          {/* 다중 선택 일괄 작업 바 + 썸네일 크기 */}
+          {/* 다중 선택 일괄 작업 바 + 문서 간 페이지 복사/붙여넣기 + 썸네일 크기 */}
           <View style={styles.batchBar}>
             <TouchableOpacity
               style={styles.batchChip}
@@ -707,6 +876,36 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
               </Text>
             </TouchableOpacity>
             <Text style={styles.batchCountText}>{orgSelected.length}장 선택됨</Text>
+
+            {/* 페이지 복사 (다른 PDF에 붙여넣기용) */}
+            <TouchableOpacity
+              style={[styles.batchActionBtn, { borderColor: '#C7D2FE', backgroundColor: '#EEF2FF' }]}
+              onPress={() =>
+                handleCopyPagesToClipboard(orgSelected.length > 0 ? orgSelected : [currentPage])
+              }
+            >
+              <Copy size={13} color="#4F46E5" />
+              <Text style={[styles.batchActionText, { color: '#4338CA' }]}>
+                📋 페이지 복사 ({orgSelected.length > 0 ? `${orgSelected.length}장` : `P.${currentPage}`})
+              </Text>
+            </TouchableOpacity>
+
+            {/* 복사된 페이지 붙여넣기 (다른 PDF 또는 현재 PDF에서 복사한 페이지) */}
+            {pageClipboard && pageClipboard.pages.length > 0 && (
+              <TouchableOpacity
+                style={[
+                  styles.batchActionBtn,
+                  { borderColor: '#A7F3D0', backgroundColor: '#ECFDF5' },
+                ]}
+                onPress={() => handlePastePagesFromClipboard()}
+              >
+                <Plus size={13} color="#059669" />
+                <Text style={[styles.batchActionText, { color: '#047857' }]}>
+                  📥 복사한 페이지 붙여넣기 ({pageClipboard.pages.length}장 ·{' '}
+                  {pageClipboard.sourceTitle.slice(0, 14)})
+                </Text>
+              </TouchableOpacity>
+            )}
 
             <TouchableOpacity
               style={[styles.batchActionBtn, orgSelected.length === 0 && styles.batchDisabled]}
@@ -777,27 +976,376 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
             ))}
           </View>
 
+          {/* 📂 다른 PDF에서 원하는 페이지만 골라서 복사·드래그 삽입하는 인라인 트레이 */}
+          {isExternalPickerOpen && (
+            <View style={styles.externalTrayCard}>
+              <View style={styles.externalTrayHeader}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.externalTrayTitle}>
+                    📂 다른 PDF에서 원하는 페이지만 복사·드래그하여 현재 PDF에 넣기
+                  </Text>
+                  <Text style={styles.externalTraySub}>
+                    아래에서 원본 PDF를 고른 뒤 원하는 페이지를 체크해 원하는 위치에 삽입하거나, 페이지 카드를 드래그해 아래 현재 PDF 페이지 위에 놓으세요.
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  style={styles.externalUploadBtn}
+                  onPress={handleLoadExternalPdfIntoTray}
+                >
+                  <Upload size={13} color="#4F46E5" />
+                  <Text style={styles.externalUploadBtnText}>+ 로컬 .pdf 파일 열기</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* 보관함 문서 선택 칩 */}
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={{ gap: 8, paddingVertical: 4 }}
+              >
+                {uploadedExternalDoc && (
+                  <TouchableOpacity
+                    style={[
+                      styles.externalDocChip,
+                      externalSourceNoteId === '__uploaded__' && styles.externalDocChipActive,
+                    ]}
+                    onPress={() => {
+                      setExternalSourceNoteId('__uploaded__');
+                      setExternalSelectedPages(uploadedExternalDoc.pages.map((_, idx) => idx + 1));
+                    }}
+                  >
+                    <FileText
+                      size={13}
+                      color={externalSourceNoteId === '__uploaded__' ? '#FFFFFF' : '#4F46E5'}
+                    />
+                    <Text
+                      style={[
+                        styles.externalDocChipText,
+                        externalSourceNoteId === '__uploaded__' && { color: '#FFFFFF' },
+                      ]}
+                    >
+                      [로컬] {uploadedExternalDoc.title} ({uploadedExternalDoc.pages.length}쪽)
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                {mergeableNotes.map((n) => {
+                  const isSel = externalSourceNoteId === n.id;
+                  const pCnt = n.pdfPages?.length || 1;
+                  return (
+                    <TouchableOpacity
+                      key={n.id}
+                      style={[styles.externalDocChip, isSel && styles.externalDocChipActive]}
+                      onPress={() => {
+                        setExternalSourceNoteId(n.id);
+                        const extracted = extractPdfPagesFromNote(n);
+                        setExternalSelectedPages(extracted.map((_, idx) => idx + 1));
+                      }}
+                    >
+                      <FileText size={13} color={isSel ? '#FFFFFF' : '#475569'} />
+                      <Text
+                        style={[styles.externalDocChipText, isSel && { color: '#FFFFFF' }]}
+                        numberOfLines={1}
+                      >
+                        {n.title || n.pdfName || '문서'} ({pCnt}쪽)
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+
+              {activeExternalPages.length > 0 && (
+                <>
+                  {/* 삽입할 목표 위치 선택 & 선택 페이지 일괄 삽입 버튼 */}
+                  <View style={styles.externalInsertBar}>
+                    <Text style={styles.batchCountText}>넣을 위치:</Text>
+                    <TouchableOpacity
+                      style={[
+                        styles.batchChip,
+                        externalInsertTargetIdx === 0 && styles.batchChipActive,
+                      ]}
+                      onPress={() => setExternalInsertTargetIdx(0)}
+                    >
+                      <Text
+                        style={[
+                          styles.batchChipText,
+                          externalInsertTargetIdx === 0 && { color: '#1D4ED8' },
+                        ]}
+                      >
+                        맨 앞 (P.1 앞)
+                      </Text>
+                    </TouchableOpacity>
+                    {pdfPages.map((_, i) => {
+                      const afterP = i + 1;
+                      const isTarget = externalInsertTargetIdx === afterP;
+                      return (
+                        <TouchableOpacity
+                          key={afterP}
+                          style={[styles.batchChip, isTarget && styles.batchChipActive]}
+                          onPress={() => setExternalInsertTargetIdx(afterP)}
+                        >
+                          <Text
+                            style={[styles.batchChipText, isTarget && { color: '#1D4ED8' }]}
+                          >
+                            P.{afterP} 뒤
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+
+                    <View style={{ flex: 1 }} />
+
+                    <TouchableOpacity
+                      style={styles.batchChip}
+                      onPress={() =>
+                        setExternalSelectedPages(
+                          externalSelectedPages.length === activeExternalPages.length
+                            ? []
+                            : activeExternalPages.map((_, i) => i + 1)
+                        )
+                      }
+                    >
+                      <Text style={styles.batchChipText}>
+                        {externalSelectedPages.length === activeExternalPages.length
+                          ? '전체 해제'
+                          : '전체 선택'}
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[
+                        styles.externalInsertExecBtn,
+                        externalSelectedPages.length === 0 && styles.batchDisabled,
+                      ]}
+                      disabled={externalSelectedPages.length === 0}
+                      onPress={() => {
+                        const sorted = [...externalSelectedPages].sort((a, b) => a - b);
+                        const chosen = sorted
+                          .map((num) => activeExternalPages[num - 1])
+                          .filter(Boolean)
+                          .map((p) => ({
+                            ...p,
+                            sourcePdfName: p.sourcePdfName || activeExternalTitle,
+                          }));
+                        if (chosen.length > 0) {
+                          onMergePages(
+                            chosen,
+                            activeExternalNote,
+                            'append',
+                            Math.min(pdfPages.length, externalInsertTargetIdx),
+                            sorted
+                          );
+                        }
+                      }}
+                    >
+                      <Plus size={14} color="#FFFFFF" />
+                      <Text style={styles.externalInsertExecText}>
+                        선택한 {externalSelectedPages.length}장 현재 PDF에 넣기
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* 선택한 외부 PDF의 페이지 썸네일 카드 리스트 (클릭 선택 또는 아래 현재 PDF로 드래그 삽입) */}
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={{ gap: 12, paddingTop: 4, paddingBottom: 4 }}
+                  >
+                    {activeExternalPages.map((ep, eIdx) => {
+                      const epNum = eIdx + 1;
+                      const isExtChecked = externalSelectedPages.includes(epNum);
+                      const webExtDragProps: any =
+                        Platform.OS === 'web'
+                          ? {
+                              draggable: true,
+                              onDragStart: () => {
+                                setDraggingPageNum(null);
+                                setDraggingExternalPage({
+                                  page: {
+                                    ...ep,
+                                    sourcePdfName: ep.sourcePdfName || activeExternalTitle,
+                                  },
+                                  pageNumber: epNum,
+                                  sourceNote: activeExternalNote,
+                                });
+                              },
+                              onDragEnd: () => {
+                                setDraggingExternalPage(null);
+                                setDragOverPageNum(null);
+                              },
+                            }
+                          : {};
+                      return (
+                        <View
+                          key={ep.id || epNum}
+                          {...webExtDragProps}
+                          style={[
+                            styles.externalPageCard,
+                            isExtChecked && { borderColor: '#4F46E5', borderWidth: 2 },
+                          ]}
+                        >
+                          <TouchableOpacity
+                            onPress={() =>
+                              setExternalSelectedPages((prev) =>
+                                prev.includes(epNum)
+                                  ? prev.filter((x) => x !== epNum)
+                                  : [...prev, epNum].sort((a, b) => a - b)
+                              )
+                            }
+                            style={styles.orgPageTopRow}
+                          >
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                              {isExtChecked ? (
+                                <CheckSquare size={15} color="#4F46E5" />
+                              ) : (
+                                <Square size={15} color="#94A3B8" />
+                              )}
+                              <View
+                                style={[
+                                  styles.orgPageNumBadge,
+                                  { backgroundColor: '#EEF2FF', borderColor: '#C7D2FE' },
+                                ]}
+                              >
+                                <Text style={[styles.orgPageNumText, { color: '#4338CA' }]}>
+                                  원본 P.{epNum}
+                                </Text>
+                              </View>
+                            </View>
+                            <Text style={styles.dragGripBadge}>⠿ 드래그 삽입</Text>
+                          </TouchableOpacity>
+
+                          {renderMiniSheet(ep, 0, 110)}
+
+                          <TouchableOpacity
+                            style={styles.externalSingleInsertBtn}
+                            onPress={() =>
+                              onMergePages(
+                                [
+                                  {
+                                    ...ep,
+                                    sourcePdfName: ep.sourcePdfName || activeExternalTitle,
+                                  },
+                                ],
+                                activeExternalNote,
+                                'append',
+                                Math.min(pdfPages.length, externalInsertTargetIdx),
+                                [epNum]
+                              )
+                            }
+                          >
+                            <Plus size={12} color="#4F46E5" />
+                            <Text style={styles.externalSingleInsertText}>
+                              이 페이지만 바로 넣기
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
+                      );
+                    })}
+                  </ScrollView>
+                </>
+              )}
+            </View>
+          )}
+
+          {/* 드래그 안내 배너 (드래그 중일 때 표시) */}
+          {(draggingPageNum !== null || draggingExternalPage !== null) && (
+            <View style={styles.dragActiveBanner}>
+              <Text style={styles.dragActiveBannerText}>
+                {draggingExternalPage
+                  ? `🖐️ 다른 PDF의 P.${draggingExternalPage.pageNumber} 페이지를 드래그 중입니다 — 원하는 위치의 페이지 카드 위에 놓으면 그 자리에 즉시 삽입됩니다!`
+                  : `🖐️ P.${draggingPageNum} 페이지를 드래그 중입니다 — 이동할 목표 위치의 페이지 카드를 클릭하거나 위에 놓으세요!`}
+              </Text>
+              <TouchableOpacity
+                onPress={() => {
+                  setDraggingPageNum(null);
+                  setDraggingExternalPage(null);
+                  setDragOverPageNum(null);
+                }}
+              >
+                <Text style={{ color: '#1D4ED8', fontWeight: '800', fontSize: 12 }}>취소</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
           <View style={styles.pageCardsGrid}>
             {pdfPages.map((p, idx) => {
               const pNum = idx + 1;
               const rot = pageRotations[pNum] || 0;
               const strokeCnt = strokeCountsByPage[pNum] || 0;
               const isChecked = orgSelected.includes(pNum);
+              const isBeingDragged = draggingPageNum === pNum;
+              const isDropTarget =
+                dragOverPageNum === pNum &&
+                (draggingExternalPage !== null ||
+                  (draggingPageNum !== null && draggingPageNum !== pNum));
+
+              const webCardDragProps: any =
+                Platform.OS === 'web'
+                  ? {
+                      draggable: true,
+                      onDragStart: () => {
+                        setDraggingExternalPage(null);
+                        setDraggingPageNum(pNum);
+                      },
+                      onDragOver: (e: any) => {
+                        e.preventDefault();
+                        if (dragOverPageNum !== pNum) setDragOverPageNum(pNum);
+                      },
+                      onDragEnter: (e: any) => {
+                        e.preventDefault();
+                        setDragOverPageNum(pNum);
+                      },
+                      onDrop: (e: any) => {
+                        e.preventDefault();
+                        handleFinalizeDropOnPage(pNum);
+                      },
+                      onDragEnd: () => {
+                        setDraggingPageNum(null);
+                        setDragOverPageNum(null);
+                      },
+                      onMouseEnter: () => {
+                        if (draggingPageNum !== null || draggingExternalPage !== null) {
+                          setDragOverPageNum(pNum);
+                        }
+                      },
+                      onMouseUp: () => {
+                        if (
+                          (draggingPageNum !== null && draggingPageNum !== pNum) ||
+                          draggingExternalPage !== null
+                        ) {
+                          handleFinalizeDropOnPage(pNum);
+                        }
+                      },
+                    }
+                  : {};
+
               return (
                 <View
                   key={p.id || pNum}
+                  {...webCardDragProps}
                   style={[
                     styles.orgPageCard,
                     { width: thumbCardWidth },
                     isChecked && { borderColor: '#2563EB', borderWidth: 2 },
                     pNum === currentPage && !isChecked && { borderColor: '#93C5FD' },
+                    isBeingDragged && { opacity: 0.55, borderColor: '#4F46E5', borderStyle: 'dashed' },
+                    isDropTarget && {
+                      borderColor: '#2563EB',
+                      borderWidth: 2.5,
+                      backgroundColor: '#EFF6FF',
+                    },
                   ]}
                 >
-                  <TouchableOpacity
-                    style={styles.orgPagePreview}
-                    onPress={() => onSelectPageAndAnnotate(pNum)}
-                    activeOpacity={0.85}
-                  >
+                  {isDropTarget && (
+                    <View style={styles.dropTargetRibbon}>
+                      <Text style={styles.dropTargetRibbonText}>
+                        {draggingExternalPage
+                          ? `📥 여기에 외부 P.${draggingExternalPage.pageNumber} 삽입`
+                          : `📍 P.${draggingPageNum} → P.${pNum} 위치로 이동`}
+                      </Text>
+                    </View>
+                  )}
+
+                  <View style={styles.orgPagePreview}>
                     <View style={styles.orgPageTopRow}>
                       <TouchableOpacity
                         onPress={() => toggleOrgSelect(pNum)}
@@ -813,20 +1361,71 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
                           <Text style={styles.orgPageNumText}>P.{pNum}</Text>
                         </View>
                       </TouchableOpacity>
-                      {p.sourcePdfName && (
-                        <Text style={styles.orgSourceBadge} numberOfLines={1}>
-                          {p.sourcePdfName}
+
+                      {/* 드래그 이동 핸들 (드래그하거나 클릭 후 목표 페이지 클릭으로도 위치 이동 가능) */}
+                      <TouchableOpacity
+                        style={[
+                          styles.dragGripPill,
+                          draggingPageNum === pNum && {
+                            backgroundColor: '#DBEAFE',
+                            borderColor: '#2563EB',
+                          },
+                        ]}
+                        onPress={() => {
+                          if (draggingExternalPage) {
+                            handleFinalizeDropOnPage(pNum);
+                          } else if (draggingPageNum === null) {
+                            setDraggingPageNum(pNum);
+                          } else if (draggingPageNum === pNum) {
+                            setDraggingPageNum(null);
+                          } else {
+                            handleFinalizeDropOnPage(pNum);
+                          }
+                        }}
+                      >
+                        <Text
+                          style={[
+                            styles.dragGripBadge,
+                            draggingPageNum === pNum && { color: '#1D4ED8' },
+                          ]}
+                        >
+                          {draggingPageNum === pNum
+                            ? '📍 이동 중'
+                            : draggingPageNum !== null || draggingExternalPage !== null
+                            ? `여기로 놓기`
+                            : '⠿ 드래그 이동'}
                         </Text>
-                      )}
+                      </TouchableOpacity>
                     </View>
-                    {renderMiniSheet(p, rot, thumbSheetHeight)}
-                    <View style={styles.orgPageFooterMeta}>
-                      <Text style={styles.orgMetaText}>
-                        필기 {strokeCnt}획 {rot ? `• ${rot}°` : ''}
+
+                    {p.sourcePdfName && (
+                      <Text
+                        style={[styles.orgSourceBadge, { maxWidth: '100%', marginBottom: 4 }]}
+                        numberOfLines={1}
+                      >
+                        출처: {p.sourcePdfName}
                       </Text>
-                      <Text style={styles.orgEditLink}>필기 열기 →</Text>
-                    </View>
-                  </TouchableOpacity>
+                    )}
+
+                    <TouchableOpacity
+                      onPress={() => {
+                        if (draggingPageNum !== null || draggingExternalPage !== null) {
+                          handleFinalizeDropOnPage(pNum);
+                        } else {
+                          onSelectPageAndAnnotate(pNum);
+                        }
+                      }}
+                      activeOpacity={0.85}
+                    >
+                      {renderMiniSheet(p, rot, thumbSheetHeight)}
+                      <View style={styles.orgPageFooterMeta}>
+                        <Text style={styles.orgMetaText}>
+                          필기 {strokeCnt}획 {rot ? `• ${rot}°` : ''}
+                        </Text>
+                        <Text style={styles.orgEditLink}>필기 열기 →</Text>
+                      </View>
+                    </TouchableOpacity>
+                  </View>
 
                   {/* 페이지 제어 버튼 바 */}
                   <View style={styles.orgActionsBar}>
@@ -861,7 +1460,10 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
 
                     <TouchableOpacity
                       style={styles.orgActionBtn}
-                      onPress={() => onDuplicatePage(pNum)}
+                      onPress={() => {
+                        handleCopyPagesToClipboard([pNum]);
+                        onDuplicatePage(pNum);
+                      }}
                     >
                       <Copy size={13} color="#059669" />
                     </TouchableOpacity>
@@ -895,10 +1497,10 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
           <View style={[styles.studioBanner, { backgroundColor: '#F3E8FF', borderColor: '#DDD6FE' }]}>
             <View style={{ flex: 1 }}>
               <Text style={[styles.studioBannerTitle, { color: '#5B21B6' }]}>
-                📑 Adobe 스타일 PDF 병합 스튜디오 (현재 {pdfPages.length}페이지)
+                📑 Adobe 스타일 PDF 병합 & 특정 페이지 골라 넣기 (현재 {pdfPages.length}페이지)
               </Text>
               <Text style={[styles.studioBannerDesc, { color: '#6D28D9' }]}>
-                외부 PDF 파일을 추가로 불러오거나 앱 내의 다른 PDF/메모를 선택하여 현재 문서의 원하는 위치에 하나로 합칠 수 있습니다.
+                다른 PDF 전체를 병합하거나 [페이지 골라서 넣기]를 눌러 원하는 페이지만 복사해 가져온 뒤, 페이지 구성 탭에서 드래그로 위치를 조정할 수 있습니다.
               </Text>
             </View>
           </View>
@@ -957,40 +1559,133 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
             </View>
           </TouchableOpacity>
 
-          {/* 병합 소스 2: 앱 내 다른 PDF / 메모 문서 선택하여 합치기 */}
+          {/* 병합 소스 2: 앱 내 다른 PDF / 메모 문서 선택하여 합치기 (전체 병합 또는 원하는 페이지만 선택 병합) */}
           <Text style={styles.subSectionHeading}>
-            📚 앱 내 보관함에서 병합할 문서 선택 ({mergeableNotes.length}개)
+            📚 앱 내 보관함에서 병합할 문서 또는 특정 페이지 선택 ({mergeableNotes.length}개)
           </Text>
           <View style={styles.mergeNotesList}>
             {mergeableNotes.map((n) => {
               const extracted = extractPdfPagesFromNote(n);
               const isPdf = n.noteType === 'pdf' || Boolean(n.pdfName);
+              const isExpanded = expandedMergeNoteId === n.id;
+              const selectedPagesForNote =
+                selectedMergePageMap[n.id] || extracted.map((_, idx) => idx + 1);
+
               return (
-                <View key={n.id} style={styles.mergeNoteCard}>
-                  <View
-                    style={[
-                      styles.mergeNoteBadge,
-                      { backgroundColor: isPdf ? '#EFF6FF' : '#FEF3C7' },
-                    ]}
-                  >
-                    <FileText size={16} color={isPdf ? '#2563EB' : '#D97706'} />
+                <View key={n.id} style={[styles.mergeNoteCard, { flexDirection: 'column', alignItems: 'stretch' }]}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                    <View
+                      style={[
+                        styles.mergeNoteBadge,
+                        { backgroundColor: isPdf ? '#EFF6FF' : '#FEF3C7' },
+                      ]}
+                    >
+                      <FileText size={16} color={isPdf ? '#2563EB' : '#D97706'} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.mergeNoteTitle} numberOfLines={1}>
+                        {n.title || n.pdfName || '제목 없음'}
+                      </Text>
+                      <Text style={styles.mergeNoteMeta}>
+                        {isPdf ? 'PDF 문서' : '노트 메모'} • {extracted.length}페이지 분량 • 필기{' '}
+                        {(n.strokes || []).length}획 포함
+                      </Text>
+                    </View>
+
+                    <TouchableOpacity
+                      style={styles.mergeSelectPagesBtn}
+                      onPress={() => {
+                        if (isExpanded) {
+                          setExpandedMergeNoteId(null);
+                        } else {
+                          setExpandedMergeNoteId(n.id);
+                          if (!selectedMergePageMap[n.id]) {
+                            setSelectedMergePageMap((prev) => ({
+                              ...prev,
+                              [n.id]: extracted.map((_, idx) => idx + 1),
+                            }));
+                          }
+                        }
+                      }}
+                    >
+                      <Text style={styles.mergeSelectPagesBtnText}>
+                        {isExpanded ? '접기 ▲' : '🔍 페이지 골라서 넣기'}
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={styles.mergeExecBtn}
+                      onPress={() => onMergePages(extracted, n, mergePosition)}
+                    >
+                      <Combine size={14} color="#FFFFFF" />
+                      <Text style={styles.mergeExecBtnText}>전체 병합 ({extracted.length}장)</Text>
+                    </TouchableOpacity>
                   </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.mergeNoteTitle} numberOfLines={1}>
-                      {n.title || n.pdfName || '제목 없음'}
-                    </Text>
-                    <Text style={styles.mergeNoteMeta}>
-                      {isPdf ? 'PDF 문서' : '노트 메모'} • {extracted.length}페이지 분량 • 필기{' '}
-                      {(n.strokes || []).length}획 포함
-                    </Text>
-                  </View>
-                  <TouchableOpacity
-                    style={styles.mergeExecBtn}
-                    onPress={() => onMergePages(extracted, n, mergePosition)}
-                  >
-                    <Combine size={14} color="#FFFFFF" />
-                    <Text style={styles.mergeExecBtnText}>이 문서 병합 ({extracted.length}장)</Text>
-                  </TouchableOpacity>
+
+                  {isExpanded && (
+                    <View style={styles.mergeExpandedBox}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                        <Text style={styles.batchCountText}>
+                          가져올 페이지를 클릭하여 선택하세요 ({selectedPagesForNote.length} / {extracted.length}장 선택됨)
+                        </Text>
+                        <TouchableOpacity
+                          style={[
+                            styles.mergeExecBtn,
+                            selectedPagesForNote.length === 0 && styles.batchDisabled,
+                          ]}
+                          disabled={selectedPagesForNote.length === 0}
+                          onPress={() => {
+                            const sorted = [...selectedPagesForNote].sort((a, b) => a - b);
+                            const chosen = sorted.map((num) => extracted[num - 1]).filter(Boolean);
+                            onMergePages(chosen, n, mergePosition, undefined, sorted);
+                          }}
+                        >
+                          <Plus size={14} color="#FFFFFF" />
+                          <Text style={styles.mergeExecBtnText}>
+                            선택한 {selectedPagesForNote.length}장만 현재 PDF에 넣기
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10 }}>
+                        {extracted.map((ep, idx) => {
+                          const pNum = idx + 1;
+                          const isSel = selectedPagesForNote.includes(pNum);
+                          return (
+                            <TouchableOpacity
+                              key={ep.id || pNum}
+                              style={[
+                                styles.externalPageCard,
+                                isSel && { borderColor: '#7C3AED', borderWidth: 2 },
+                              ]}
+                              onPress={() => {
+                                setSelectedMergePageMap((prev) => {
+                                  const cur = prev[n.id] || extracted.map((_, i) => i + 1);
+                                  const next = cur.includes(pNum)
+                                    ? cur.filter((x) => x !== pNum)
+                                    : [...cur, pNum].sort((a, b) => a - b);
+                                  return { ...prev, [n.id]: next };
+                                });
+                              }}
+                            >
+                              <View style={styles.orgPageTopRow}>
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                                  {isSel ? (
+                                    <CheckSquare size={14} color="#7C3AED" />
+                                  ) : (
+                                    <Square size={14} color="#94A3B8" />
+                                  )}
+                                  <Text style={{ fontSize: 11.5, fontWeight: '800', color: '#5B21B6' }}>
+                                    P.{pNum}
+                                  </Text>
+                                </View>
+                              </View>
+                              {renderMiniSheet(ep, 0, 96)}
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </ScrollView>
+                    </View>
+                  )}
                 </View>
               );
             })}
@@ -2077,5 +2772,184 @@ const styles = StyleSheet.create({
     fontSize: 11.5,
     fontWeight: '700',
     color: '#B91C1C',
+  },
+  bannerImportBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#6366F1',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 10,
+  },
+  externalTrayCard: {
+    backgroundColor: '#EEF2FF',
+    borderWidth: 1.5,
+    borderColor: '#C7D2FE',
+    borderRadius: 14,
+    padding: 14,
+    gap: 10,
+  },
+  externalTrayHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  externalTrayTitle: {
+    fontSize: 13.5,
+    fontWeight: '800',
+    color: '#312E81',
+  },
+  externalTraySub: {
+    fontSize: 12,
+    color: '#4338CA',
+    marginTop: 2,
+  },
+  externalUploadBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#A5B4FC',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+  },
+  externalUploadBtnText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#4F46E5',
+  },
+  externalDocChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 9,
+  },
+  externalDocChipActive: {
+    backgroundColor: '#4F46E5',
+    borderColor: '#4F46E5',
+  },
+  externalDocChipText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#334155',
+    maxWidth: 220,
+  },
+  externalInsertBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 6,
+    backgroundColor: '#FFFFFF',
+    padding: 9,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#E0E7FF',
+  },
+  externalInsertExecBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#4F46E5',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+  },
+  externalInsertExecText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#FFFFFF',
+  },
+  externalPageCard: {
+    width: 175,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    padding: 9,
+    gap: 6,
+  },
+  externalSingleInsertBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    backgroundColor: '#EEF2FF',
+    borderWidth: 1,
+    borderColor: '#C7D2FE',
+    paddingVertical: 5,
+    borderRadius: 7,
+  },
+  externalSingleInsertText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#4338CA',
+  },
+  dragGripPill: {
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  dragGripBadge: {
+    fontSize: 10.5,
+    fontWeight: '800',
+    color: '#475569',
+  },
+  dragActiveBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1.5,
+    borderColor: '#60A5FA',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+  },
+  dragActiveBannerText: {
+    fontSize: 12.5,
+    fontWeight: '700',
+    color: '#1E40AF',
+  },
+  dropTargetRibbon: {
+    backgroundColor: '#2563EB',
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+  },
+  dropTargetRibbonText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  mergeSelectPagesBtn: {
+    backgroundColor: '#F3E8FF',
+    borderWidth: 1,
+    borderColor: '#C4B5FD',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
+  mergeSelectPagesBtnText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#6D28D9',
+  },
+  mergeExpandedBox: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0',
   },
 });
