@@ -578,6 +578,23 @@ export const StickyCard: React.FC<StickyCardProps> = React.memo(({
                 style={styles.pdfMiniSheetWrapper}
               >
                 <View style={styles.pdfMiniSheet}>
+                  {note.pdfPages?.[0]?.renderedImageUri ? (
+                    <>
+                      {/* 실제 PDF 원본 1페이지 렌더링 이미지 */}
+                      <Image
+                        source={{ uri: note.pdfPages[0].renderedImageUri }}
+                        style={styles.pdfMiniRealImage}
+                        resizeMode="contain"
+                      />
+                      <View style={styles.pdfMiniRealBadge} pointerEvents="none">
+                        <FileText size={10} color="#FFFFFF" />
+                        <Text style={styles.pdfMiniRealBadgeText}>
+                          PDF · {pdfDoc.pages.length}쪽
+                        </Text>
+                      </View>
+                    </>
+                  ) : (
+                  <>
                   {/* 1. 상단 공식 헤더 */}
                   <View style={styles.pdfMiniHeaderRow}>
                     <View style={styles.pdfMiniDocBadge}>
@@ -605,6 +622,8 @@ export const StickyCard: React.FC<StickyCardProps> = React.memo(({
                   <Text style={styles.pdfMiniBodyText} numberOfLines={5}>
                     {pdfDoc.pages[0]?.content || note.content}
                   </Text>
+                  </>
+                  )}
 
                   {/* 4. 실시간 Bézier 벡터 필기 & 기하 도형(사각형, 원, 화살표) 오버레이 */}
                   {note.strokes && note.strokes.length > 0 && (
@@ -1515,6 +1534,29 @@ const styles = StyleSheet.create({
     maxHeight: 220,
     overflow: 'hidden',
     position: 'relative',
+  },
+  pdfMiniRealImage: {
+    ...StyleSheet.absoluteFillObject,
+    width: '100%',
+    height: '100%',
+    backgroundColor: '#FFFFFF',
+  },
+  pdfMiniRealBadge: {
+    position: 'absolute',
+    right: 6,
+    bottom: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(220, 38, 38, 0.92)',
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  pdfMiniRealBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '800',
   },
   pdfMiniHeaderRow: {
     flexDirection: 'row',

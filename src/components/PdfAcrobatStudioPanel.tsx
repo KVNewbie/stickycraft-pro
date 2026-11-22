@@ -6,6 +6,7 @@ import {
   TouchableOpacity,
   ScrollView,
   TextInput,
+  Image,
   Platform,
 } from 'react-native';
 import {
@@ -28,77 +29,37 @@ import {
   LayoutGrid,
   Edit3,
   X,
+  Image as ImageIcon,
+  CheckSquare,
+  Square,
 } from 'lucide-react-native';
-import { Note, PdfPageData, PaperTemplate } from '../types/note';
+import { Note, PdfDocumentMeta, PdfPageData, PaperTemplate } from '../types/note';
 import { SAMPLE_DOCUMENTS } from '../constants/sampleDocuments';
+import { createPdfPagesFromImages, renderRealPdfFile } from '../utils/pdfEngine';
 
 export type PdfWorkspaceTab = 'annotate' | 'organize' | 'merge' | 'split';
 
 /**
- * 업로드된 실제 PDF 파일(ArrayBuffer)에서 페이지 수(/Type /Page) 및 메타 정보를 추출하여
- * PdfPageData 배열로 변환합니다.
+ * 업로드된 실제 .pdf 파일을 오프라인 PDF.js 엔진으로 고화질 렌더링 + 읽기 순서 텍스트 추출 + 메타데이터 파싱하여
+ * PdfPageData 배열로 변환합니다. (PDF.js 실패 시 경량 바이트 파서 자동 폴백)
  */
-export async function parseUploadedPdfFile(file: File): Promise<{
+export async function parseUploadedPdfFile(
+  file: File,
+  onProgress?: (current: number, total: number) => void
+): Promise<{
   fileName: string;
   pages: PdfPageData[];
+  meta: PdfDocumentMeta;
+  usedRealRenderer: boolean;
 }> {
   const fileName = file.name || '업로드_문서.pdf';
-  const cleanTitle = fileName.replace(/\.pdf$/i, '');
-  const fileSizeKb = Math.max(1, Math.round((file.size || 10240) / 1024));
-
-  let detectedPageCount = 3;
-  const extractedSnippets: string[] = [];
-
-  try {
-    const buffer = await file.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
-    // PDF 바이트 스트림에서 /Type /Page 패턴으로 실제 페이지 수 추정 (최대 30페이지 제한)
-    const latin = new TextDecoder('latin1').decode(bytes.slice(0, Math.min(bytes.length, 1500000)));
-    const pageMatches = latin.match(/\/Type\s*\/Page\b(?!s)/g);
-    if (pageMatches && pageMatches.length > 0) {
-      detectedPageCount = Math.max(1, Math.min(20, pageMatches.length));
-    }
-
-    // 괄호 안의 텍스트 리터럴 중 읽을 수 있는 문구 일부 추출 시도
-    const textMatches = latin.match(/\(([^()]{4,120})\)/g);
-    if (textMatches && textMatches.length > 0) {
-      for (const raw of textMatches) {
-        const inner = raw.slice(1, -1).replace(/\\[nrt]/g, ' ').trim();
-        if (/^[A-Za-z0-9가-힣\s.,:;!?()\-_/]+$/.test(inner) && inner.length >= 6) {
-          extractedSnippets.push(inner);
-          if (extractedSnippets.length >= detectedPageCount * 3) break;
-        }
-      }
-    }
-  } catch {
-    detectedPageCount = 3;
-  }
-
-  const nowStr = new Date().toLocaleDateString('ko-KR', {
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-  });
-
-  const pages: PdfPageData[] = Array.from({ length: detectedPageCount }).map((_, idx) => {
-    const pNum = idx + 1;
-    const snippetGroup = extractedSnippets.slice(idx * 3, idx * 3 + 3);
-    const bodyText =
-      snippetGroup.length > 0
-        ? `[원본 PDF 파일 정보]\n• 파일명: ${fileName} (${fileSizeKb} KB)\n• 페이지: ${pNum} / ${detectedPageCount} 페이지\n• 불러온 날짜: ${nowStr}\n\n[추출된 문서 텍스트]\n${snippetGroup.join('\n')}\n\n이 페이지 위에 만년필·형광펜 필기, 도형, 텍스트 상자, 음성 녹음 핀을 자유롭게 추가하거나 상단 [페이지 구성 / 병합 / 분할] 탭에서 페이지를 편집할 수 있습니다.`
-        : `[원본 PDF 문서 시트]\n• 파일명: ${fileName} (${fileSizeKb} KB)\n• 페이지: ${pNum} / ${detectedPageCount} 페이지\n• 불러온 날짜: ${nowStr}\n\n이 문서는 내 기기에서 불러온 PDF 문서의 ${pNum}번째 페이지입니다.\n하단 필기 도구(만년필, 형광펜, 도형, 텍스트 상자, 레이저 포인터)로 주석을 작성하거나, 상단 Adobe PDF 도구 바에서 [페이지 구성], [다른 PDF와 병합], [원하는 페이지 분할 추출]을 수행할 수 있습니다.`;
-
-    return {
-      id: `pdfp_${Date.now()}_${pNum}_${Math.random().toString(36).substring(2, 6)}`,
-      pageNumber: pNum,
-      title: `${cleanTitle} — Page ${pNum}`,
-      subtitle: `${fileName} (${pNum}/${detectedPageCount} 페이지 • ${fileSizeKb} KB)`,
-      content: bodyText,
-      sourcePdfName: fileName,
-    };
-  });
-
-  return { fileName, pages };
+  const rendered = await renderRealPdfFile(file, onProgress);
+  return {
+    fileName,
+    pages: rendered.pages,
+    meta: rendered.meta,
+    usedRealRenderer: rendered.usedRealRenderer,
+  };
 }
 
 /**
@@ -154,7 +115,12 @@ export function extractPdfPagesFromNote(note: Note): PdfPageData[] {
 
 interface PdfOpenLauncherProps {
   existingPdfNotes: Note[];
-  onOpenUploadedPdf: (fileName: string, pages: PdfPageData[], initialTab: PdfWorkspaceTab) => void;
+  onOpenUploadedPdf: (
+    fileName: string,
+    pages: PdfPageData[],
+    initialTab: PdfWorkspaceTab,
+    meta?: PdfDocumentMeta
+  ) => void;
   onCreateBlankPdf: (title: string, pageCount: number, template: PaperTemplate, initialTab: PdfWorkspaceTab) => void;
   onSelectExistingNote: (note: Note, initialTab: PdfWorkspaceTab) => void;
   onCancel: () => void;
@@ -162,7 +128,7 @@ interface PdfOpenLauncherProps {
 
 /**
  * 새 메모 -> PDF 문서 열기 클릭 시 나타나는 Adobe Acrobat 스타일 PDF 시작 & 파일 열기 허브
- * (기존 샘플 문서가 멋대로 열리는 대신, 파일 열기 / 새 빈 PDF / 기존 문서 선택 및 편집·병합·분할 모드를 직접 선택)
+ * (기존 샘플 문서가 멋대로 열리는 대신, 파일 열기 / 이미지→PDF / 새 빈 PDF / 기존 문서 선택)
  */
 export const PdfOpenLauncherView: React.FC<PdfOpenLauncherProps> = ({
   existingPdfNotes,
@@ -176,6 +142,7 @@ export const PdfOpenLauncherView: React.FC<PdfOpenLauncherProps> = ({
   const [newPdfPagesCount, setNewPdfPagesCount] = useState(3);
   const [newPdfTemplate, setNewPdfTemplate] = useState<PaperTemplate>('blank');
   const [isLoadingFile, setIsLoadingFile] = useState(false);
+  const [loadingProgressText, setLoadingProgressText] = useState('');
 
   const handleTriggerFileUpload = () => {
     if (Platform.OS === 'web' && typeof document !== 'undefined') {
@@ -187,11 +154,16 @@ export const PdfOpenLauncherView: React.FC<PdfOpenLauncherProps> = ({
         const files: FileList | undefined = e.target?.files;
         if (!files || files.length === 0) return;
         setIsLoadingFile(true);
+        setLoadingProgressText('PDF 원본 렌더링 준비 중...');
         try {
           let combinedPages: PdfPageData[] = [];
           let primaryName = files[0].name;
+          let primaryMeta: PdfDocumentMeta | undefined;
           for (let i = 0; i < files.length; i++) {
-            const parsed = await parseUploadedPdfFile(files[i]);
+            const parsed = await parseUploadedPdfFile(files[i], (cur, tot) => {
+              setLoadingProgressText(`PDF 원본 페이지 렌더링 중... (${cur}/${tot})`);
+            });
+            if (i === 0) primaryMeta = parsed.meta;
             combinedPages = [...combinedPages, ...parsed.pages];
           }
           const reindexed = combinedPages.map((p, idx) => ({
@@ -201,15 +173,41 @@ export const PdfOpenLauncherView: React.FC<PdfOpenLauncherProps> = ({
           if (files.length > 1) {
             primaryName = `${files[0].name.replace(/\.pdf$/i, '')}_외_${files.length - 1}건_병합.pdf`;
           }
-          onOpenUploadedPdf(primaryName, reindexed, selectedActionTab);
+          onOpenUploadedPdf(primaryName, reindexed, selectedActionTab, primaryMeta);
         } finally {
           setIsLoadingFile(false);
+          setLoadingProgressText('');
         }
       };
       input.click();
     } else {
-      // 모바일 네이티브 환경 폴백: 새 문서 즉시 생성
       onCreateBlankPdf(newPdfTitle, newPdfPagesCount, newPdfTemplate, selectedActionTab);
+    }
+  };
+
+  const handleTriggerImagesToPdf = () => {
+    if (Platform.OS === 'web' && typeof document !== 'undefined') {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/png,image/jpeg,image/webp,image/*';
+      input.multiple = true;
+      input.onchange = async (e: any) => {
+        const files: FileList | undefined = e.target?.files;
+        if (!files || files.length === 0) return;
+        setIsLoadingFile(true);
+        setLoadingProgressText(`이미지 ${files.length}장을 A4 PDF로 변환 중...`);
+        try {
+          const pages = await createPdfPagesFromImages(Array.from(files));
+          const base = files[0].name.replace(/\.[^.]+$/, '') || '이미지문서';
+          const docName =
+            files.length > 1 ? `${base}_외_${files.length - 1}장.pdf` : `${base}.pdf`;
+          onOpenUploadedPdf(docName, pages, selectedActionTab);
+        } finally {
+          setIsLoadingFile(false);
+          setLoadingProgressText('');
+        }
+      };
+      input.click();
     }
   };
 
@@ -316,30 +314,45 @@ export const PdfOpenLauncherView: React.FC<PdfOpenLauncherProps> = ({
         {/* STEP 2: PDF 파일 불러오기 또는 새 빈 PDF 생성 */}
         <Text style={styles.stepHeading}>2. 문서 열기 또는 새로 만들기</Text>
         <View style={styles.sourceCardsRow}>
-          {/* 내 기기에서 PDF 파일 열기 */}
-          <TouchableOpacity
-            style={styles.uploadDropCard}
-            onPress={handleTriggerFileUpload}
-            activeOpacity={0.85}
-          >
-            <View style={styles.uploadIconCircle}>
-              <Upload size={28} color="#2563EB" />
-            </View>
-            <Text style={styles.uploadCardTitle}>
-              {isLoadingFile
-                ? 'PDF 문서 분석 및 불러오는 중...'
-                : selectedActionTab === 'merge'
-                ? '내 PC/기기에서 병합할 PDF 파일 선택 (다중 선택 가능)'
-                : '내 PC/기기에서 PDF 파일 불러오기 (.pdf)'}
-            </Text>
-            <Text style={styles.uploadCardSub}>
-              클릭하여 로컬 저장소의 PDF 문서를 선택하면 선택한 [{ACTION_MODES.find((a) => a.id === selectedActionTab)?.label}] 모드로 즉시 열립니다.
-            </Text>
-            <View style={styles.uploadPrimaryBtn}>
-              <FolderPlus size={16} color="#FFFFFF" />
-              <Text style={styles.uploadPrimaryBtnText}>내 파일 탐색기에서 PDF 열기</Text>
-            </View>
-          </TouchableOpacity>
+          {/* 내 기기에서 PDF 파일 열기 / 이미지 → PDF */}
+          <View style={styles.uploadDropCard}>
+            <TouchableOpacity
+              style={{ alignItems: 'center', gap: 10, width: '100%' }}
+              onPress={handleTriggerFileUpload}
+              activeOpacity={0.85}
+            >
+              <View style={styles.uploadIconCircle}>
+                <Upload size={28} color="#2563EB" />
+              </View>
+              <Text style={styles.uploadCardTitle}>
+                {isLoadingFile
+                  ? loadingProgressText || 'PDF 문서 분석 및 불러오는 중...'
+                  : selectedActionTab === 'merge'
+                  ? '내 PC/기기에서 병합할 PDF 파일 선택 (다중 선택 가능)'
+                  : '내 PC/기기에서 PDF 파일 불러오기 (.pdf)'}
+              </Text>
+              <Text style={styles.uploadCardSub}>
+                실제 PDF 원본 레이아웃·표·이미지를 고화질 렌더링하고 텍스트 검색까지 자동 지원합니다.
+              </Text>
+              <View style={styles.uploadPrimaryBtn}>
+                <FolderPlus size={16} color="#FFFFFF" />
+                <Text style={styles.uploadPrimaryBtnText}>내 파일 탐색기에서 PDF 열기</Text>
+              </View>
+            </TouchableOpacity>
+
+            <View style={styles.uploadOrDivider} />
+
+            <TouchableOpacity
+              style={styles.uploadImagesBtn}
+              onPress={handleTriggerImagesToPdf}
+              activeOpacity={0.85}
+            >
+              <ImageIcon size={15} color="#7C3AED" />
+              <Text style={styles.uploadImagesBtnText}>
+                🖼️ 이미지 여러 장(.png/.jpg)으로 새 PDF 만들기
+              </Text>
+            </TouchableOpacity>
+          </View>
 
           {/* 새 빈 PDF 문서 생성 */}
           <View style={styles.newBlankPdfCard}>
@@ -494,6 +507,9 @@ interface PdfAcrobatStudioPanelProps {
     position: 'append' | 'prepend' | 'after_current'
   ) => void;
   onSplitPages: (selectedPageNums: number[], removeOriginalPages: boolean, newDocTitle: string) => void;
+  onBatchRotatePages?: (pageNums: number[]) => void;
+  onBatchDeletePages?: (pageNums: number[]) => void;
+  onSplitEveryNPages?: (chunkSize: number, baseTitle: string) => void;
 }
 
 /**
@@ -516,11 +532,30 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
   onInsertBlankPageAfter,
   onMergePages,
   onSplitPages,
+  onBatchRotatePages,
+  onBatchDeletePages,
+  onSplitEveryNPages,
 }) => {
   // 병합(Merge) 상태
   const [mergePosition, setMergePosition] = useState<'append' | 'prepend' | 'after_current'>('append');
+  const [isMergeLoading, setIsMergeLoading] = useState(false);
+
+  // 페이지 구성(Organize) 다중 선택 & 썸네일 크기 상태
+  const [orgSelected, setOrgSelected] = useState<number[]>([]);
+  const [thumbSize, setThumbSize] = useState<'sm' | 'md' | 'lg'>('md');
+  const thumbCardWidth = thumbSize === 'sm' ? 170 : thumbSize === 'lg' ? 310 : 235;
+  const thumbSheetHeight = thumbSize === 'sm' ? 120 : thumbSize === 'lg' ? 300 : 170;
+
+  const toggleOrgSelect = (pNum: number) => {
+    setOrgSelected((prev) =>
+      prev.includes(pNum) ? prev.filter((p) => p !== pNum) : [...prev, pNum].sort((a, b) => a - b)
+    );
+  };
 
   // 분할(Split) 상태
+  const [splitMode, setSplitMode] = useState<'select' | 'every-n'>('select');
+  const [splitChunkSize, setSplitChunkSize] = useState<number>(1);
+  const [splitChunkInput, setSplitChunkInput] = useState<string>('');
   const [selectedSplitPages, setSelectedSplitPages] = useState<number[]>([1]);
   const [splitRangeInput, setSplitRangeInput] = useState('1');
   const [splitNewTitle, setSplitNewTitle] = useState(
@@ -572,13 +607,18 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
       input.onchange = async (e: any) => {
         const files: FileList | undefined = e.target?.files;
         if (!files || files.length === 0) return;
-        let incoming: PdfPageData[] = [];
-        for (let i = 0; i < files.length; i++) {
-          const parsed = await parseUploadedPdfFile(files[i]);
-          incoming = [...incoming, ...parsed.pages];
-        }
-        if (incoming.length > 0) {
-          onMergePages(incoming, null, mergePosition);
+        setIsMergeLoading(true);
+        try {
+          let incoming: PdfPageData[] = [];
+          for (let i = 0; i < files.length; i++) {
+            const parsed = await parseUploadedPdfFile(files[i]);
+            incoming = [...incoming, ...parsed.pages];
+          }
+          if (incoming.length > 0) {
+            onMergePages(incoming, null, mergePosition);
+          }
+        } finally {
+          setIsMergeLoading(false);
         }
       };
       input.click();
@@ -586,6 +626,41 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
   };
 
   const mergeableNotes = allNotes.filter((n) => !n.isDeleted && n.id !== currentNoteId);
+
+  // 실제 PDF 렌더링 이미지 or 텍스트 기반 미니 시트 공용 렌더러
+  const renderMiniSheet = (p: PdfPageData, rot: number, height: number) => (
+    <View
+      style={[
+        styles.orgMiniSheet,
+        { height },
+        p.renderedImageUri ? { padding: 0, overflow: 'hidden', backgroundColor: '#FFFFFF' } : null,
+        rot ? { transform: [{ rotate: `${rot}deg` }] } : undefined,
+      ]}
+    >
+      {p.renderedImageUri ? (
+        <Image
+          source={{ uri: p.renderedImageUri }}
+          style={{ width: '100%', height: '100%' }}
+          resizeMode="contain"
+        />
+      ) : (
+        <>
+          <Text style={styles.orgMiniTitle} numberOfLines={2}>
+            {p.title}
+          </Text>
+          {p.subtitle ? (
+            <Text style={styles.orgMiniSub} numberOfLines={1}>
+              {p.subtitle}
+            </Text>
+          ) : null}
+          <View style={styles.orgMiniDivider} />
+          <Text style={styles.orgMiniContent} numberOfLines={Math.max(2, Math.floor(height / 22))}>
+            {p.content}
+          </Text>
+        </>
+      )}
+    </View>
+  );
 
   return (
     <ScrollView style={styles.studioScroll} contentContainerStyle={styles.studioContent}>
@@ -598,7 +673,7 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
                 🗂️ 페이지 구성 및 정렬 (총 {pdfPages.length}페이지)
               </Text>
               <Text style={styles.studioBannerDesc}>
-                각 페이지의 순서를 앞뒤로 이동하거나 90° 회전, 복제, 새 페이지 삽입 및 삭제를 수행할 수 있습니다. 페이지를 클릭하면 필기 편집 화면으로 이동합니다.
+                체크박스로 여러 페이지를 선택해 일괄 회전·삭제·추출하거나, 각 페이지의 순서 이동·복제·삽입을 수행하세요. 썸네일을 클릭하면 필기 화면으로 이동합니다.
               </Text>
             </View>
             <TouchableOpacity
@@ -610,50 +685,144 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
             </TouchableOpacity>
           </View>
 
+          {/* 다중 선택 일괄 작업 바 + 썸네일 크기 */}
+          <View style={styles.batchBar}>
+            <TouchableOpacity
+              style={styles.batchChip}
+              onPress={() =>
+                setOrgSelected(
+                  orgSelected.length === pdfPages.length ? [] : pdfPages.map((_, i) => i + 1)
+                )
+              }
+            >
+              {orgSelected.length === pdfPages.length && pdfPages.length > 0 ? (
+                <CheckSquare size={14} color="#2563EB" />
+              ) : (
+                <Square size={14} color="#64748B" />
+              )}
+              <Text style={styles.batchChipText}>
+                {orgSelected.length === pdfPages.length && pdfPages.length > 0
+                  ? '선택 해제'
+                  : '전체 선택'}
+              </Text>
+            </TouchableOpacity>
+            <Text style={styles.batchCountText}>{orgSelected.length}장 선택됨</Text>
+
+            <TouchableOpacity
+              style={[styles.batchActionBtn, orgSelected.length === 0 && styles.batchDisabled]}
+              disabled={orgSelected.length === 0}
+              onPress={() => {
+                if (onBatchRotatePages) onBatchRotatePages(orgSelected);
+                else orgSelected.forEach((p) => onRotatePage(p));
+              }}
+            >
+              <RotateCw size={13} color="#2563EB" />
+              <Text style={[styles.batchActionText, { color: '#1D4ED8' }]}>일괄 90° 회전</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.batchActionBtn, orgSelected.length === 0 && styles.batchDisabled]}
+              disabled={orgSelected.length === 0}
+              onPress={() => {
+                onSplitPages(
+                  orgSelected,
+                  false,
+                  `${title.replace(/\.pdf$/i, '')}_선택추출.pdf`
+                );
+                setOrgSelected([]);
+              }}
+            >
+              <Copy size={13} color="#059669" />
+              <Text style={[styles.batchActionText, { color: '#047857' }]}>새 PDF로 추출</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.batchActionBtn,
+                (orgSelected.length === 0 || orgSelected.length >= pdfPages.length) &&
+                  styles.batchDisabled,
+              ]}
+              disabled={orgSelected.length === 0 || orgSelected.length >= pdfPages.length}
+              onPress={() => {
+                if (onBatchDeletePages) onBatchDeletePages(orgSelected);
+                else [...orgSelected].sort((a, b) => b - a).forEach((p) => onDeletePage(p));
+                setOrgSelected([]);
+              }}
+            >
+              <Trash2 size={13} color="#DC2626" />
+              <Text style={[styles.batchActionText, { color: '#B91C1C' }]}>일괄 삭제</Text>
+            </TouchableOpacity>
+
+            <View style={{ flex: 1 }} />
+
+            <Text style={styles.batchCountText}>썸네일:</Text>
+            {(
+              [
+                { id: 'sm', label: '작게' },
+                { id: 'md', label: '보통' },
+                { id: 'lg', label: '크게' },
+              ] as const
+            ).map((s) => (
+              <TouchableOpacity
+                key={s.id}
+                style={[styles.batchChip, thumbSize === s.id && styles.batchChipActive]}
+                onPress={() => setThumbSize(s.id)}
+              >
+                <Text
+                  style={[styles.batchChipText, thumbSize === s.id && { color: '#1D4ED8' }]}
+                >
+                  {s.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
           <View style={styles.pageCardsGrid}>
             {pdfPages.map((p, idx) => {
               const pNum = idx + 1;
               const rot = pageRotations[pNum] || 0;
               const strokeCnt = strokeCountsByPage[pNum] || 0;
+              const isChecked = orgSelected.includes(pNum);
               return (
-                <View key={p.id || pNum} style={styles.orgPageCard}>
+                <View
+                  key={p.id || pNum}
+                  style={[
+                    styles.orgPageCard,
+                    { width: thumbCardWidth },
+                    isChecked && { borderColor: '#2563EB', borderWidth: 2 },
+                    pNum === currentPage && !isChecked && { borderColor: '#93C5FD' },
+                  ]}
+                >
                   <TouchableOpacity
                     style={styles.orgPagePreview}
                     onPress={() => onSelectPageAndAnnotate(pNum)}
                     activeOpacity={0.85}
                   >
                     <View style={styles.orgPageTopRow}>
-                      <View style={styles.orgPageNumBadge}>
-                        <Text style={styles.orgPageNumText}>P.{pNum}</Text>
-                      </View>
+                      <TouchableOpacity
+                        onPress={() => toggleOrgSelect(pNum)}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}
+                      >
+                        {isChecked ? (
+                          <CheckSquare size={16} color="#2563EB" />
+                        ) : (
+                          <Square size={16} color="#94A3B8" />
+                        )}
+                        <View style={styles.orgPageNumBadge}>
+                          <Text style={styles.orgPageNumText}>P.{pNum}</Text>
+                        </View>
+                      </TouchableOpacity>
                       {p.sourcePdfName && (
                         <Text style={styles.orgSourceBadge} numberOfLines={1}>
                           {p.sourcePdfName}
                         </Text>
                       )}
                     </View>
-                    <View
-                      style={[
-                        styles.orgMiniSheet,
-                        rot ? { transform: [{ rotate: `${rot}deg` }] } : undefined,
-                      ]}
-                    >
-                      <Text style={styles.orgMiniTitle} numberOfLines={2}>
-                        {p.title}
-                      </Text>
-                      {p.subtitle ? (
-                        <Text style={styles.orgMiniSub} numberOfLines={1}>
-                          {p.subtitle}
-                        </Text>
-                      ) : null}
-                      <View style={styles.orgMiniDivider} />
-                      <Text style={styles.orgMiniContent} numberOfLines={4}>
-                        {p.content}
-                      </Text>
-                    </View>
+                    {renderMiniSheet(p, rot, thumbSheetHeight)}
                     <View style={styles.orgPageFooterMeta}>
                       <Text style={styles.orgMetaText}>
-                        필기 {strokeCnt}획 {rot ? `• ${rot}° 회전됨` : ''}
+                        필기 {strokeCnt}획 {rot ? `• ${rot}°` : ''}
                       </Text>
                       <Text style={styles.orgEditLink}>필기 열기 →</Text>
                     </View>
@@ -775,7 +944,9 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
             </View>
             <View style={{ flex: 1 }}>
               <Text style={styles.mergeUploadTitle}>
-                + 내 PC/기기에서 다른 PDF 파일 선택하여 현재 문서에 병합
+                {isMergeLoading
+                  ? '⏳ PDF 원본 페이지를 렌더링하여 병합하는 중...'
+                  : '+ 내 PC/기기에서 다른 PDF 파일 선택하여 현재 문서에 병합'}
               </Text>
               <Text style={styles.mergeUploadSub}>
                 하나 또는 여러 개의 .pdf 파일을 선택하면 위에서 지정한 위치에 즉시 병합됩니다.
@@ -842,6 +1013,107 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
             </View>
           </View>
 
+          {/* 분할 모드 전환: 선택/범위 분할 vs 매 N페이지마다 자동 일괄 분할 */}
+          <View style={styles.splitModeSwitch}>
+            {(
+              [
+                { id: 'select', label: '✂️ 선택 / 범위 분할' },
+                { id: 'every-n', label: '📚 매 N페이지마다 자동 일괄 분할' },
+              ] as const
+            ).map((m) => (
+              <TouchableOpacity
+                key={m.id}
+                style={[styles.splitModeBtn, splitMode === m.id && styles.splitModeBtnActive]}
+                onPress={() => setSplitMode(m.id)}
+              >
+                <Text
+                  style={[styles.splitModeText, splitMode === m.id && styles.splitModeTextActive]}
+                >
+                  {m.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          {splitMode === 'every-n' && (
+            <View style={styles.splitConfigCard}>
+              <Text style={styles.mergePosLabel}>몇 페이지씩 나눌까요?</Text>
+              <View style={styles.splitQuickRow}>
+                {[1, 2, 3, 5, 10].map((n) => (
+                  <TouchableOpacity
+                    key={n}
+                    style={[
+                      styles.splitQuickChip,
+                      splitChunkSize === n && !splitChunkInput && styles.splitQuickChipActive,
+                    ]}
+                    onPress={() => {
+                      setSplitChunkSize(n);
+                      setSplitChunkInput('');
+                    }}
+                  >
+                    <Text style={styles.splitQuickChipText}>{n}장씩</Text>
+                  </TouchableOpacity>
+                ))}
+                <TextInput
+                  style={[styles.titleInput, { width: 110 }]}
+                  value={splitChunkInput}
+                  onChangeText={(v) => {
+                    const clean = v.replace(/[^0-9]/g, '');
+                    setSplitChunkInput(clean);
+                    const num = parseInt(clean, 10);
+                    if (!isNaN(num) && num >= 1) setSplitChunkSize(num);
+                  }}
+                  placeholder="직접 입력"
+                  placeholderTextColor="#94A3B8"
+                  keyboardType="numeric"
+                />
+              </View>
+
+              {(() => {
+                const size = Math.max(1, Math.min(pdfPages.length, splitChunkSize));
+                const chunkCount = Math.ceil(pdfPages.length / size);
+                const ranges = Array.from({ length: chunkCount }).map((_, i) => {
+                  const s = i * size + 1;
+                  const e = Math.min(pdfPages.length, (i + 1) * size);
+                  return s === e ? `P.${s}` : `P.${s}~${e}`;
+                });
+                return (
+                  <>
+                    <Text style={styles.splitPreviewText}>
+                      총 {pdfPages.length}페이지 → <Text style={{ fontWeight: '900' }}>{chunkCount}개</Text>의 PDF 문서로 분할됩니다:
+                    </Text>
+                    <View style={styles.splitQuickRow}>
+                      {ranges.slice(0, 24).map((r, i) => (
+                        <View key={r} style={styles.splitRangePill}>
+                          <Text style={styles.splitRangePillText}>
+                            #{i + 1} {r}
+                          </Text>
+                        </View>
+                      ))}
+                      {ranges.length > 24 && (
+                        <Text style={styles.splitPreviewText}>... 외 {ranges.length - 24}개</Text>
+                      )}
+                    </View>
+                    <TouchableOpacity
+                      style={[styles.splitExtractBtn, chunkCount < 2 && { opacity: 0.4 }]}
+                      disabled={chunkCount < 2 || !onSplitEveryNPages}
+                      onPress={() =>
+                        onSplitEveryNPages?.(size, title.replace(/\.pdf$/i, '') || '분할문서')
+                      }
+                    >
+                      <Scissors size={15} color="#FFFFFF" />
+                      <Text style={styles.splitExtractBtnText}>
+                        {chunkCount}개의 새 PDF 메모로 한 번에 일괄 분할 (원본 유지)
+                      </Text>
+                    </TouchableOpacity>
+                  </>
+                );
+              })()}
+            </View>
+          )}
+
+          {splitMode === 'select' && (
+          <>
           {/* 분할 범위 빠른 선택 & 새 문서 제목 입력 바 */}
           <View style={styles.splitConfigCard}>
             <View style={styles.splitQuickRow}>
@@ -1024,20 +1296,14 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
                       </Text>
                     </View>
 
-                    <View style={styles.orgMiniSheet}>
-                      <Text style={styles.orgMiniTitle} numberOfLines={2}>
-                        {p.title}
-                      </Text>
-                      <View style={styles.orgMiniDivider} />
-                      <Text style={styles.orgMiniContent} numberOfLines={4}>
-                        {p.content}
-                      </Text>
-                    </View>
+                    {renderMiniSheet(p, pageRotations[pNum] || 0, 170)}
                   </View>
                 </TouchableOpacity>
               );
             })}
           </View>
+          </>
+          )}
         </View>
       )}
     </ScrollView>
@@ -1687,5 +1953,129 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 12.5,
     fontWeight: '700',
+  },
+  uploadOrDivider: {
+    width: '80%',
+    height: 1,
+    backgroundColor: '#BFDBFE',
+    marginVertical: 4,
+  },
+  uploadImagesBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1.5,
+    borderColor: '#C4B5FD',
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 10,
+  },
+  uploadImagesBtnText: {
+    fontSize: 12.5,
+    fontWeight: '800',
+    color: '#6D28D9',
+  },
+  batchBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 12,
+    padding: 10,
+  },
+  batchChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  batchChipActive: {
+    backgroundColor: '#EFF6FF',
+    borderColor: '#2563EB',
+  },
+  batchChipText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#475569',
+  },
+  batchCountText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#64748B',
+  },
+  batchActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+  },
+  batchActionText: {
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  batchDisabled: {
+    opacity: 0.4,
+  },
+  splitModeSwitch: {
+    flexDirection: 'row',
+    gap: 6,
+    backgroundColor: '#FFFFFF',
+    padding: 5,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  splitModeBtn: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 9,
+    borderRadius: 9,
+  },
+  splitModeBtnActive: {
+    backgroundColor: '#DC2626',
+  },
+  splitModeText: {
+    fontSize: 12.5,
+    fontWeight: '800',
+    color: '#475569',
+  },
+  splitModeTextActive: {
+    color: '#FFFFFF',
+  },
+  splitQuickChipActive: {
+    backgroundColor: '#FEE2E2',
+    borderColor: '#DC2626',
+  },
+  splitPreviewText: {
+    fontSize: 12.5,
+    color: '#334155',
+    fontWeight: '600',
+  },
+  splitRangePill: {
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 7,
+  },
+  splitRangePillText: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    color: '#B91C1C',
   },
 });

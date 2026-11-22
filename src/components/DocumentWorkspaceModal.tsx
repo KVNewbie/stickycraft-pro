@@ -6,6 +6,7 @@ import {
   TouchableOpacity,
   TextInput,
   ScrollView,
+  Image,
   Platform,
   Dimensions,
   PanResponder,
@@ -71,8 +72,34 @@ import {
   PanelRight,
   FilePlus2,
   ClipboardCopy,
+  Stamp,
+  EyeOff,
+  MessageSquare,
+  Droplets,
+  ChartBar,
+  GitCompare,
+  Command,
+  Columns2,
+  Rows3,
+  FileDown,
+  ImageDown,
 } from 'lucide-react-native';
-import { Note, NoteImage, FreeHandStroke, AudioNote, PaperTemplate, FreeTextBox, PdfPageData } from '../types/note';
+import {
+  Note,
+  NoteImage,
+  FreeHandStroke,
+  AudioNote,
+  PaperTemplate,
+  FreeTextBox,
+  PdfPageData,
+  PdfViewLayout,
+  PdfWatermarkConfig,
+  PdfHeaderFooterConfig,
+  PdfStampItem,
+  PdfRedactionRect,
+  PdfCommentThread,
+  PdfDocumentMeta,
+} from '../types/note';
 import { useNoteStore } from '../store/useNoteStore';
 import { AudioRecordingStudio } from './AudioRecordingStudio';
 import { PaperTemplatePattern } from './PaperTemplatePattern';
@@ -94,11 +121,25 @@ import {
 } from './PdfAcrobatStudioPanel';
 import {
   captureDocumentBlockSnapshot,
+  captureDocumentBlockSnapshotAsync,
   copyBlockToClipboard,
   BlockRect,
   CapturedBlockResult,
 } from '../utils/pdfBlockCapture';
 import { PdfSideNoteDrawer, SideNoteSnippetItem } from './PdfSideNoteDrawer';
+import {
+  exportDocumentToRealPdf,
+  exportPageToPngFile,
+  computeDocumentWordStats,
+} from '../utils/pdfEngine';
+import {
+  PdfCommandPaletteModal,
+  PdfWatermarkHeaderModal,
+  PdfPropertiesStatsModal,
+  PdfCompareModal,
+  PdfCommentsDrawer,
+  PdfCommandItem,
+} from './PdfToolsOverlays';
 
 interface DocumentWorkspaceModalProps {
   note?: Note | null;
@@ -428,11 +469,81 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
   const [undoStack, setUndoStack] = useState<StrokeWithPage[][]>([]);
   const [redoStack, setRedoStack] = useState<StrokeWithPage[][]>([]);
 
-  // 툴박스 도구 설정 (Goodnotes / Notewise / Flexcil 블록 발췌 통합)
+  // 툴박스 도구 설정 (Goodnotes / Notewise / Flexcil 블록 발췌 + 스탬프·먹칠·댓글 통합)
   const [activeTool, setActiveTool] = useState<
-    'hand' | 'fountain' | 'pen' | 'highlighter' | 'eraser' | 'shape' | 'text' | 'lasso' | 'snippet' | 'laser'
+    | 'hand'
+    | 'fountain'
+    | 'pen'
+    | 'highlighter'
+    | 'eraser'
+    | 'shape'
+    | 'text'
+    | 'lasso'
+    | 'snippet'
+    | 'laser'
+    | 'stamp'
+    | 'redact'
+    | 'comment'
   >('fountain');
   const [shapeType, setShapeType] = useState<'rect' | 'circle' | 'arrow' | 'line'>('rect');
+
+  // PDF 보기 레이아웃 (단일 페이지 / 연속 세로 스크롤 / 양면 2페이지 나란히 보기)
+  const [viewLayout, setViewLayout] = useState<PdfViewLayout>('single');
+
+  // 워터마크 & 머리글·바닥글·페이지 번호 & 스탬프 & 먹칠 & 스레드 댓글 & 메타데이터 상태
+  const [pdfWatermark, setPdfWatermark] = useState<PdfWatermarkConfig>(
+    initialNote?.pdfWatermark || {
+      enabled: false,
+      text: '기밀 CONFIDENTIAL',
+      opacity: 0.14,
+      color: '#DC2626',
+    }
+  );
+  const [pdfHeaderFooter, setPdfHeaderFooter] = useState<PdfHeaderFooterConfig>(
+    initialNote?.pdfHeaderFooter || {
+      enabled: false,
+      headerText: '',
+      footerText: '',
+      showPageNumbers: true,
+    }
+  );
+  const [pdfStamps, setPdfStamps] = useState<PdfStampItem[]>(initialNote?.pdfStamps || []);
+  const [pdfRedactions, setPdfRedactions] = useState<PdfRedactionRect[]>(
+    initialNote?.pdfRedactions || []
+  );
+  const [pdfComments, setPdfComments] = useState<PdfCommentThread[]>(
+    initialNote?.pdfComments || []
+  );
+  const [pdfMeta, setPdfMeta] = useState<PdfDocumentMeta>(initialNote?.pdfMeta || {});
+
+  const STAMP_PRESETS = [
+    { label: '승인 APPROVED', sublabel: 'STICKYCRAFT REVIEW', color: '#059669' },
+    { label: '초안 DRAFT', sublabel: 'WORKING DOCUMENT', color: '#2563EB' },
+    { label: '검토 완료 REVIEWED', sublabel: 'VERIFIED', color: '#7C3AED' },
+    { label: '중요 IMPORTANT', sublabel: 'PRIORITY', color: '#D97706' },
+    { label: '기밀 CONFIDENTIAL', sublabel: 'DO NOT DISTRIBUTE', color: '#DC2626' },
+  ] as const;
+  const [activeStampPresetIdx, setActiveStampPresetIdx] = useState<number>(0);
+  const activeStampPresetRef = useRef(STAMP_PRESETS[0]);
+  activeStampPresetRef.current = STAMP_PRESETS[activeStampPresetIdx] as any;
+
+  // 민감정보 먹칠(Redaction) 드래그 상태
+  const [redactDraftRect, setRedactDraftRect] = useState<{
+    startX: number;
+    startY: number;
+    currentX: number;
+    currentY: number;
+  } | null>(null);
+  const redactDraftRectRef = useRef(redactDraftRect);
+  redactDraftRectRef.current = redactDraftRect;
+
+  // Stage 2 전문가 모달 & 드로어 상태 (명령 팔레트 Ctrl+K, 워터마크, 속성/통계, PDF 비교, 댓글 드로어)
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  const [isWatermarkModalOpen, setIsWatermarkModalOpen] = useState(false);
+  const [isPropertiesModalOpen, setIsPropertiesModalOpen] = useState(false);
+  const [isCompareModalOpen, setIsCompareModalOpen] = useState(false);
+  const [isCommentsDrawerOpen, setIsCommentsDrawerOpen] = useState(false);
+  const [activeCommentThreadId, setActiveCommentThreadId] = useState<string | null>(null);
 
   // Flexcil / LiquidText 스타일 PDF 블록 지정 캡처 & 복사 / 노트로 보내기 상태
   const [snippetDraftRect, setSnippetDraftRect] = useState<{
@@ -718,6 +829,12 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
         noteType: isPdfMode ? 'pdf' : 'canvas',
         pdfName: isPdfMode ? finalTitle : undefined,
         pdfPages: normalizedPdfPages,
+        pdfWatermark,
+        pdfHeaderFooter,
+        pdfStamps,
+        pdfRedactions,
+        pdfComments,
+        pdfMeta,
         bookmarkedPages,
         pageTemplates,
       });
@@ -744,6 +861,12 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
         noteType: isPdfMode ? 'pdf' : 'canvas',
         pdfName: isPdfMode ? finalTitle : undefined,
         pdfPages: normalizedPdfPages,
+        pdfWatermark,
+        pdfHeaderFooter,
+        pdfStamps,
+        pdfRedactions,
+        pdfComments,
+        pdfMeta,
         bookmarkedPages,
         pageTemplates,
       });
@@ -948,8 +1071,11 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
 
     const pageStrokes = strokesRef.current.filter((s) => (s.pageIndex || 1) === currentPageRef.current);
     const pageTextBoxes = textBoxes.filter((t) => (t.pageIndex || 1) === currentPageRef.current);
+    const pageStamps = pdfStamps.filter((st) => st.pageIndex === currentPageRef.current);
+    const pageRedactions = pdfRedactions.filter((r) => r.pageIndex === currentPageRef.current);
+    const rawPdfPageData = isPdfMode ? pdfPages[currentPageRef.current - 1] || null : null;
 
-    const captured = captureDocumentBlockSnapshot({
+    const syncCaptured = captureDocumentBlockSnapshot({
       cropRect,
       pageWidth: pageLayout.width || 720,
       pageHeight: pageLayout.height || 1018,
@@ -959,13 +1085,36 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
       pdfPage: pageObj,
       strokes: pageStrokes,
       textBoxes: pageTextBoxes,
+      redactions: pageRedactions,
+      hasRenderedImage: Boolean(rawPdfPageData?.renderedImageUri),
     });
 
     setCapturedBlockRect(cropRect);
-    setCapturedBlockResult(captured);
+    setCapturedBlockResult(syncCaptured);
+
+    // 실제 PDF 이미지·스탬프·워터마크·먹칠까지 완벽 합성한 고화질 이미지로 비동기 업그레이드
+    captureDocumentBlockSnapshotAsync({
+      cropRect,
+      pageWidth: pageLayout.width || 720,
+      pageHeight: pageLayout.height || 1018,
+      isPdfMode,
+      isNightMode,
+      paperTemplate: pageTemplates[currentPageRef.current] || paperTemplate,
+      pdfPage: pageObj,
+      pdfPageData: rawPdfPageData,
+      strokes: pageStrokes,
+      textBoxes: pageTextBoxes,
+      stamps: pageStamps,
+      redactions: pageRedactions,
+      watermark: pdfWatermark,
+      headerFooter: pdfHeaderFooter,
+    }).then((asyncRes) => {
+      setCapturedBlockResult(asyncRes);
+    });
+
     setExportToastMessage(
-      captured.extractedText
-        ? `✂️ 블록 영역 및 텍스트(${captured.extractedText.length}자) 지정 완료! 복사 또는 노트로 보내기 가능`
+      syncCaptured.extractedText
+        ? `✂️ 블록 영역 및 텍스트(${syncCaptured.extractedText.length}자) 지정 완료! 복사 또는 노트로 보내기 가능`
         : '✂️ 블록 영역 캡처 완료! 복사하거나 노트로 가져올 수 있습니다'
     );
     setTimeout(() => setExportToastMessage(null), 2600);
@@ -1187,11 +1336,17 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
     setTimeout(() => setExportToastMessage(null), 2600);
   };
 
-  // 데스크톱 Web 단축키 & 파워 제스처 핸들러 (Ctrl+Z/Y, Ctrl+F 검색, Space 꾹 눌러 임시 손바닥 스크롤, PageUp/PageDown, Ctrl+Wheel 줌)
+  // 데스크톱 Web 단축키 & 파워 제스처 핸들러 (Ctrl+K 명령 팔레트, Ctrl+Z/Y, Ctrl+F 검색, Space 임시 손바닥 스크롤, PageUp/PageDown, Ctrl+Wheel 줌)
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof window === 'undefined') return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setIsCommandPaletteOpen((prev) => !prev);
+        return;
+      }
+
       const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
       if (tag === 'input' || tag === 'textarea') return;
 
@@ -1229,6 +1384,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
         setCapturedBlockRect(null);
         setCapturedBlockResult(null);
         setSnippetDraftRect(null);
+        setRedactDraftRect(null);
         setIsAppendNotePickerOpen(false);
         setSelectedTextBoxId(null);
         setIsColorPickerOpen(false);
@@ -1238,6 +1394,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
         setIsExportModalOpen(false);
         setIsPageJumpModalOpen(false);
         setIsSearchOpen(false);
+        setIsCommandPaletteOpen(false);
       } else if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedStrokeIdsRef.current.length > 0) {
           handleDeleteSelection();
@@ -1843,6 +2000,412 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
     setIsExportModalOpen(false);
   };
 
+  // 실제 .pdf 바이너리 파일 다운로드 (pdf-lib 엔진: 원본 이미지·필기·스탬프·워터마크·머리글·먹칠·회전 모두 반영)
+  const handleExportRealPdfBinary = async () => {
+    setExportToastMessage('⏳ 실제 PDF(.pdf) 문서를 합성하여 생성하는 중...');
+    try {
+      const ok = await exportDocumentToRealPdf({
+        title: title || 'StickyCraft_Document.pdf',
+        totalPages,
+        pageWidth: pageLayout.width || 720,
+        pageHeight: pageLayout.height || 1018,
+        isPdfMode,
+        isNightMode,
+        defaultTemplate: paperTemplate,
+        pageTemplates,
+        pageRotations,
+        pdfPages,
+        strokes: strokesRef.current,
+        textBoxes,
+        stamps: pdfStamps,
+        redactions: pdfRedactions,
+        watermark: pdfWatermark,
+        headerFooter: pdfHeaderFooter,
+        meta: pdfMeta,
+      });
+      setIsExportModalOpen(false);
+      setExportToastMessage(
+        ok
+          ? `📄 '${(title || 'document').replace(/\.pdf$/i, '')}.pdf' 실제 PDF 파일이 다운로드되었습니다!`
+          : '⚠️ PDF 내보내기는 웹 브라우저 환경에서 지원됩니다.'
+      );
+      setTimeout(() => setExportToastMessage(null), 3200);
+    } catch (err) {
+      console.warn('Real PDF export failed:', err);
+      setExportToastMessage('⚠️ PDF 생성 중 오류가 발생했습니다.');
+      setTimeout(() => setExportToastMessage(null), 2500);
+    }
+  };
+
+  // 현재 페이지를 2x HiDPI PNG 이미지 파일로 다운로드
+  const handleExportCurrentPagePng = async () => {
+    setExportToastMessage(`⏳ P.${currentPage} 페이지를 고해상도 PNG 이미지로 저장 중...`);
+    const ok = await exportPageToPngFile({
+      fileNameBase: title || 'StickyCraft_Page',
+      pageNumber: currentPage,
+      totalPages,
+      pageWidth: pageLayout.width || 720,
+      pageHeight: pageLayout.height || 1018,
+      isPdfMode,
+      isNightMode,
+      paperTemplate: pageTemplates[currentPage] || paperTemplate,
+      pdfPage: pdfPages[currentPage - 1] || null,
+      strokes: strokesRef.current.filter((s) => (s.pageIndex || 1) === currentPage),
+      textBoxes: textBoxes.filter((t) => (t.pageIndex || 1) === currentPage),
+      stamps: pdfStamps.filter((s) => s.pageIndex === currentPage),
+      redactions: pdfRedactions.filter((r) => r.pageIndex === currentPage),
+      watermark: pdfWatermark,
+      headerFooter: pdfHeaderFooter,
+    });
+    setIsExportModalOpen(false);
+    setExportToastMessage(
+      ok
+        ? `🖼️ P.${currentPage} 고해상도 PNG 이미지가 다운로드되었습니다!`
+        : '⚠️ PNG 이미지 저장에 실패했습니다.'
+    );
+    setTimeout(() => setExportToastMessage(null), 2800);
+  };
+
+  // 다중 페이지 일괄 90° 회전
+  const handleBatchRotatePages = (pageNums: number[]) => {
+    if (!pageNums || pageNums.length === 0) return;
+    setPageRotations((prev) => {
+      const next = { ...prev };
+      for (const p of pageNums) {
+        next[p] = ((prev[p] || 0) + 90) % 360;
+      }
+      return next;
+    });
+    setExportToastMessage(`🔄 선택한 ${pageNums.length}개 페이지가 일괄 90° 회전되었습니다!`);
+    setTimeout(() => setExportToastMessage(null), 2200);
+  };
+
+  // 다중 페이지 일괄 삭제
+  const handleBatchDeletePages = (pageNums: number[]) => {
+    if (!pageNums || pageNums.length === 0 || pageNums.length >= totalPages) return;
+    const removeSet = new Set(pageNums);
+    const remainingMap = new Map<number, number>();
+    let nextIdx = 1;
+    const remainingPages: PdfPageData[] = [];
+    for (let oldNum = 1; oldNum <= totalPages; oldNum++) {
+      if (!removeSet.has(oldNum)) {
+        remainingMap.set(oldNum, nextIdx);
+        if (pdfPages[oldNum - 1]) {
+          remainingPages.push({ ...pdfPages[oldNum - 1], pageNumber: nextIdx });
+        }
+        nextIdx++;
+      }
+    }
+    const newTotal = Math.max(1, nextIdx - 1);
+    if (isPdfMode) setPdfPages(remainingPages);
+    const nextStrokes = strokesRef.current
+      .filter((s) => remainingMap.has(s.pageIndex || 1))
+      .map((s) => ({ ...s, pageIndex: remainingMap.get(s.pageIndex || 1) || 1 }));
+    strokesRef.current = nextStrokes;
+    setStrokes(nextStrokes);
+    setTextBoxes((prev) =>
+      prev
+        .filter((t) => remainingMap.has(t.pageIndex || 1))
+        .map((t) => ({ ...t, pageIndex: remainingMap.get(t.pageIndex || 1) || 1 }))
+    );
+    setAudioNotes((prev) =>
+      prev
+        .filter((a) => remainingMap.has(a.pageIndex || 1))
+        .map((a) => ({ ...a, pageIndex: remainingMap.get(a.pageIndex || 1) || 1 }))
+    );
+    setPdfStamps((prev) =>
+      prev
+        .filter((st) => remainingMap.has(st.pageIndex))
+        .map((st) => ({ ...st, pageIndex: remainingMap.get(st.pageIndex) || 1 }))
+    );
+    setPdfRedactions((prev) =>
+      prev
+        .filter((r) => remainingMap.has(r.pageIndex))
+        .map((r) => ({ ...r, pageIndex: remainingMap.get(r.pageIndex) || 1 }))
+    );
+    setPdfComments((prev) =>
+      prev
+        .filter((c) => remainingMap.has(c.pageIndex))
+        .map((c) => ({ ...c, pageIndex: remainingMap.get(c.pageIndex) || 1 }))
+    );
+    setTotalPages(newTotal);
+    setCurrentPage(1);
+    setExportToastMessage(`🗑️ 선택한 ${pageNums.length}개 페이지가 일괄 삭제되었습니다.`);
+    setTimeout(() => setExportToastMessage(null), 2200);
+  };
+
+  // 매 N페이지마다 자동 일괄 분할 (Split every N pages)
+  const handleSplitEveryNPages = (chunkSize: number, baseTitle: string) => {
+    const size = Math.max(1, chunkSize);
+    const total = pdfPages.length;
+    if (total < 2) return;
+    let createdCount = 0;
+    for (let start = 1; start <= total; start += size) {
+      const end = Math.min(total, start + size - 1);
+      const nums: number[] = [];
+      for (let p = start; p <= end; p++) nums.push(p);
+      const label = start === end ? `P${start}` : `P${start}-${end}`;
+      handleSplitPages(nums, false, `${baseTitle}_${label}.pdf`);
+      createdCount++;
+    }
+    setExportToastMessage(
+      `📚 ${size}장씩 총 ${createdCount}개의 분할 PDF 문서가 보관함에 일괄 생성되었습니다!`
+    );
+    setTimeout(() => setExportToastMessage(null), 3200);
+  };
+
+  // 스탬프 배치 / 먹칠 확정 / 스레드 댓글 핀 배치 핸들러
+  const placeStampAt = (x: number, y: number, pageNum = currentPageRef.current) => {
+    const preset = activeStampPresetRef.current;
+    const newStamp: PdfStampItem = {
+      id: `stmp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      pageIndex: pageNum,
+      x: Math.max(12, Math.min((pageLayout.width || 720) - 150, x - 68)),
+      y: Math.max(12, Math.min((pageLayout.height || 1018) - 56, y - 22)),
+      label: preset.label,
+      sublabel: preset.sublabel,
+      color: preset.color,
+      rotation: -8,
+    };
+    setPdfStamps((prev) => [...prev, newStamp]);
+    setExportToastMessage(`💮 P.${pageNum}에 [${preset.label}] 스탬프가 찍혔습니다.`);
+    setTimeout(() => setExportToastMessage(null), 1800);
+  };
+
+  const finalizeRedactionRect = (
+    startX: number,
+    startY: number,
+    endX: number,
+    endY: number,
+    pageNum = currentPageRef.current
+  ) => {
+    const x = Math.max(0, Math.min(startX, endX));
+    const y = Math.max(0, Math.min(startY, endY));
+    const width = Math.abs(endX - startX);
+    const height = Math.abs(endY - startY);
+    if (width < 12 || height < 10) return;
+    const newRedaction: PdfRedactionRect = {
+      id: `rdct_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      pageIndex: pageNum,
+      x: Math.round(x),
+      y: Math.round(y),
+      width: Math.round(width),
+      height: Math.round(height),
+      reason: 'REDACTED',
+    };
+    setPdfRedactions((prev) => [...prev, newRedaction]);
+    setExportToastMessage(
+      `⬛ 민감정보 먹칠 적용 완료 (블록 발췌 및 실제 PDF 저장 시 영구 마스킹)`
+    );
+    setTimeout(() => setExportToastMessage(null), 2200);
+  };
+
+  const placeCommentPinAt = (x: number, y: number, pageNum = currentPageRef.current) => {
+    const newThread: PdfCommentThread = {
+      id: `cmnt_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      pageIndex: pageNum,
+      x: Math.max(16, Math.min((pageLayout.width || 720) - 44, Math.round(x))),
+      y: Math.max(16, Math.min((pageLayout.height || 1018) - 44, Math.round(y))),
+      resolved: false,
+      createdAt: Date.now(),
+      messages: [
+        {
+          id: `cmsg_${Date.now()}`,
+          author: pdfMeta.author || '검토자',
+          text: `P.${pageNum} (${Math.round(x)}, ${Math.round(y)}) 위치 검토 메모`,
+          createdAt: Date.now(),
+        },
+      ],
+    };
+    setPdfComments((prev) => [...prev, newThread]);
+    setActiveCommentThreadId(newThread.id);
+    setIsCommentsDrawerOpen(true);
+    setExportToastMessage(`💬 P.${pageNum}에 스레드 댓글 핀이 추가되었습니다.`);
+    setTimeout(() => setExportToastMessage(null), 2000);
+  };
+
+  // 문서 단어 수 & 주석 통계 실시간 집계
+  const documentWordStats = React.useMemo(
+    () =>
+      computeDocumentWordStats({
+        pdfPages,
+        currentPage,
+        totalPages,
+        strokes,
+        textBoxes,
+        stamps: pdfStamps,
+        redactions: pdfRedactions,
+        comments: pdfComments,
+      }),
+    [pdfPages, currentPage, totalPages, strokes, textBoxes, pdfStamps, pdfRedactions, pdfComments]
+  );
+
+  // Ctrl+K 명령 팔레트 전체 명령 목록
+  const commandPaletteItems: PdfCommandItem[] = React.useMemo(
+    () => [
+      {
+        id: 'view-single',
+        label: '보기 레이아웃: 단일 페이지 (Single Page)',
+        description: '한 페이지씩 집중해서 필기 및 주석 작업',
+        category: '보기',
+        keywords: 'single 단일 한쪽',
+        onExecute: () => {
+          setPdfWorkspaceTab('annotate');
+          setViewLayout('single');
+        },
+      },
+      {
+        id: 'view-continuous',
+        label: '보기 레이아웃: 연속 세로 스크롤 (Continuous Scroll)',
+        description: '모든 페이지를 위아래로 끊김 없이 연속 스크롤하며 열람 및 필기',
+        category: '보기',
+        keywords: 'continuous 연속 스크롤 전체',
+        onExecute: () => {
+          setPdfWorkspaceTab('annotate');
+          setViewLayout('continuous');
+        },
+      },
+      {
+        id: 'view-twoup',
+        label: '보기 레이아웃: 양면 2페이지 나란히 보기 (Two-Up Spread)',
+        description: '책처럼 좌우 두 페이지를 한 화면에 나란히 펼쳐서 열람 및 비교',
+        category: '보기',
+        keywords: 'two-up 양면 2쪽 펼침',
+        onExecute: () => {
+          setPdfWorkspaceTab('annotate');
+          setViewLayout('two-up');
+        },
+      },
+      {
+        id: 'tool-stamp',
+        label: '스탬프 도구 (승인 / 초안 / 기밀 / 검토 완료)',
+        description: '페이지 원하는 위치에 공식 검토 스탬프 배치',
+        category: '편집',
+        keywords: 'stamp 스탬프 도장 승인 기밀 초안',
+        onExecute: () => {
+          setPdfWorkspaceTab('annotate');
+          setActiveTool('stamp');
+        },
+      },
+      {
+        id: 'tool-redact',
+        label: '민감정보 먹칠 / 가림 도구 (Redaction)',
+        description: '개인정보나 기밀 문구를 드래그해 검정 박스로 영구 마스킹',
+        category: '편집',
+        keywords: 'redact 먹칠 가림 개인정보 마스킹',
+        onExecute: () => {
+          setPdfWorkspaceTab('annotate');
+          setActiveTool('redact');
+        },
+      },
+      {
+        id: 'tool-comment',
+        label: '스레드 댓글 핀 추가 및 댓글 패널 열기',
+        description: '페이지 좌표에 댓글 핀을 찍고 답글/해결 상태 관리',
+        category: '검토',
+        keywords: 'comment 댓글 코멘트 리뷰 검토',
+        onExecute: () => {
+          setPdfWorkspaceTab('annotate');
+          setActiveTool('comment');
+          setIsCommentsDrawerOpen(true);
+        },
+      },
+      {
+        id: 'tool-snippet',
+        label: 'PDF 블록 지정 캡처 & 노트로 가져오기',
+        description: '원하는 영역을 드래그해 클립보드 복사 또는 새 노트/사이드 노트로 발췌',
+        category: '편집',
+        keywords: 'snippet block 블록 캡처 발췌 복사',
+        onExecute: () => {
+          setPdfWorkspaceTab('annotate');
+          setActiveTool('snippet');
+        },
+      },
+      {
+        id: 'modal-watermark',
+        label: '워터마크 · 머리글 · 바닥글 · 페이지 번호 설정',
+        description: '대각선 워터마크(기밀/초안) 및 머리글·바닥글·자동 페이지 번호 구성',
+        category: '편집',
+        keywords: 'watermark header footer 워터마크 머리글 바닥글 페이지번호',
+        onExecute: () => setIsWatermarkModalOpen(true),
+      },
+      {
+        id: 'modal-compare',
+        label: '두 PDF 문서 비교 (Compare PDFs)',
+        description: '현재 PDF와 다른 PDF 문서의 페이지별 추가/삭제된 줄 차이점 비교',
+        category: '검토',
+        keywords: 'compare diff 비교 차이',
+        onExecute: () => setIsCompareModalOpen(true),
+      },
+      {
+        id: 'modal-props',
+        label: '문서 속성 및 단어 수 / 주석 통계 보기',
+        description: '작성자·주제·키워드 메타데이터 편집 및 페이지/전체 단어·글자 수 확인',
+        category: '검토',
+        keywords: 'properties word count 속성 통계 단어 글자수 메타데이터',
+        onExecute: () => setIsPropertiesModalOpen(true),
+      },
+      {
+        id: 'tab-organize',
+        label: '페이지 구성 스튜디오 (다중 선택 / 일괄 회전 / 순서 변경)',
+        description: '썸네일 그리드에서 페이지를 다중 선택하여 일괄 회전·삭제·추출',
+        category: '문서 구성',
+        keywords: 'organize 페이지 구성 회전 정렬',
+        onExecute: () => setPdfWorkspaceTab('organize'),
+      },
+      {
+        id: 'tab-merge',
+        label: 'PDF 병합 스튜디오 (Merge PDF)',
+        description: '외부 PDF 파일이나 앱 내 노트를 현재 문서의 원하는 위치에 병합',
+        category: '문서 구성',
+        keywords: 'merge combine 병합 합치기',
+        onExecute: () => setPdfWorkspaceTab('merge'),
+      },
+      {
+        id: 'tab-split',
+        label: 'PDF 분할 및 매 N페이지 자동 일괄 분할 (Split PDF)',
+        description: '특정 페이지 범위 추출 또는 매 N장마다 여러 PDF로 자동 분할',
+        category: '문서 구성',
+        keywords: 'split extract 분할 추출 나누기',
+        onExecute: () => setPdfWorkspaceTab('split'),
+      },
+      {
+        id: 'export-real-pdf',
+        label: '실제 PDF 파일로 다운로드 (.pdf)',
+        description: '필기·스탬프·워터마크·먹칠이 모두 합쳐진 정식 .pdf 바이너리 파일 저장',
+        category: '내보내기',
+        keywords: 'export download pdf 저장 내보내기 다운로드',
+        onExecute: handleExportRealPdfBinary,
+      },
+      {
+        id: 'export-png',
+        label: `현재 페이지(P.${currentPage}) 고해상도 PNG 이미지 저장 (.png)`,
+        description: '현재 페이지를 2x HiDPI PNG 이미지 파일로 즉시 다운로드',
+        category: '내보내기',
+        keywords: 'png image 이미지 사진 저장',
+        onExecute: handleExportCurrentPagePng,
+      },
+      {
+        id: 'search-doc',
+        label: '문서 내 키워드 검색',
+        description: 'PDF 전체 페이지에서 단어를 검색하고 즉시 점프',
+        category: '보기',
+        shortcut: 'Ctrl+F',
+        keywords: 'search find 검색 찾기',
+        onExecute: () => setIsSearchOpen(true),
+      },
+      {
+        id: 'toggle-night',
+        label: isNightMode ? '주간 모드로 전환' : '야간 다크 모드로 전환',
+        description: '눈부심 방지 다크 리더 모드 토글',
+        category: '보기',
+        keywords: 'night dark 야간 다크',
+        onExecute: () => setIsNightMode((p) => !p),
+      },
+    ],
+    [currentPage, isNightMode, title, totalPages, pdfPages, pdfStamps, pdfRedactions, pdfWatermark, pdfHeaderFooter, pdfMeta]
+  );
+
   // 특정 페이지로 직접 이동 (Jump to Page)
   const handleJumpToPage = (targetNum: number) => {
     const p = Math.max(1, Math.min(totalPages, targetNum));
@@ -1857,7 +2420,10 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
       onStartShouldSetPanResponder: () =>
         activeToolRef.current !== 'hand',
       onMoveShouldSetPanResponder: () =>
-        activeToolRef.current !== 'hand' && activeToolRef.current !== 'text',
+        activeToolRef.current !== 'hand' &&
+        activeToolRef.current !== 'text' &&
+        activeToolRef.current !== 'stamp' &&
+        activeToolRef.current !== 'comment',
       onPanResponderGrant: (evt: GestureResponderEvent) => {
         const { locationX, locationY } = evt.nativeEvent;
         if (activeToolRef.current === 'text') {
@@ -1877,6 +2443,26 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           return;
         }
         setSelectedTextBoxId(null);
+
+        if (activeToolRef.current === 'stamp') {
+          placeStampAt(locationX, locationY, currentPageRef.current);
+          return;
+        }
+
+        if (activeToolRef.current === 'comment') {
+          placeCommentPinAt(locationX, locationY, currentPageRef.current);
+          return;
+        }
+
+        if (activeToolRef.current === 'redact') {
+          setRedactDraftRect({
+            startX: locationX,
+            startY: locationY,
+            currentX: locationX,
+            currentY: locationY,
+          });
+          return;
+        }
 
         if (activeToolRef.current === 'laser') {
           if (laserFadeTimerRef.current) clearTimeout(laserFadeTimerRef.current);
@@ -1975,6 +2561,15 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           return;
         }
 
+        if (activeToolRef.current === 'redact') {
+          if (redactDraftRectRef.current) {
+            setRedactDraftRect((prev) =>
+              prev ? { ...prev, currentX: locationX, currentY: locationY } : null
+            );
+          }
+          return;
+        }
+
         if (activeToolRef.current === 'snippet') {
           if (snippetDraftRectRef.current) {
             setSnippetDraftRect((prev) =>
@@ -2055,6 +2650,15 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           laserFadeTimerRef.current = setTimeout(() => {
             setLaserTrail([]);
           }, 500);
+          return;
+        }
+
+        if (activeToolRef.current === 'redact') {
+          const draft = redactDraftRectRef.current;
+          setRedactDraftRect(null);
+          if (draft) {
+            finalizeRedactionRect(draft.startX, draft.startY, draft.currentX, draft.currentY);
+          }
           return;
         }
 
@@ -2306,7 +2910,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
     window.addEventListener('mouseup', onHandUp);
   };
 
-  // 데스크톱 웹 마우스 드래그 핸들러 (손바닥 Grab-to-Scroll + Space 임시 패닝 + 블록 발췌 + 60fps 무끊김 필기)
+  // 데스크톱 웹 마우스 드래그 핸들러 (손바닥 Grab-to-Scroll + Space 임시 패닝 + 스탬프/먹칠/댓글 + 블록 발췌 + 60fps 무끊김 필기)
   const handleWebMouseDown = (e: any) => {
     if (Platform.OS !== 'web') return;
 
@@ -2339,6 +2943,31 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
     }
     setSelectedTextBoxId(null);
 
+    if (activeToolRef.current === 'stamp') {
+      e.preventDefault?.();
+      placeStampAt(x, y, currentPageRef.current);
+      return;
+    }
+
+    if (activeToolRef.current === 'comment') {
+      e.preventDefault?.();
+      placeCommentPinAt(x, y, currentPageRef.current);
+      return;
+    }
+
+    if (activeToolRef.current === 'redact') {
+      e.preventDefault?.();
+      const draft = {
+        startX: x,
+        startY: y,
+        currentX: x,
+        currentY: y,
+      };
+      redactDraftRectRef.current = draft;
+      setRedactDraftRect(draft);
+      return;
+    }
+
     if (activeToolRef.current === 'laser') {
       if (laserFadeTimerRef.current) clearTimeout(laserFadeTimerRef.current);
       setLaserPoint({ x, y });
@@ -2352,12 +2981,14 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
       setCapturedBlockRect(null);
       setCapturedBlockResult(null);
       setIsAppendNotePickerOpen(false);
-      setSnippetDraftRect({
+      const draft = {
         startX: x,
         startY: y,
         currentX: x,
         currentY: y,
-      });
+      };
+      snippetDraftRectRef.current = draft;
+      setSnippetDraftRect(draft);
       return;
     }
 
@@ -2377,12 +3008,14 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
       setSelectedStrokeIds([]);
       setSelectionBBox(null);
       setIsDraggingSelection(false);
-      setSelectionRect({
+      const selDraft = {
         startX: x,
         startY: y,
         currentX: x,
         currentY: y,
-      });
+      };
+      selectionRectRef.current = selDraft;
+      setSelectionRect(selDraft);
       return;
     }
 
@@ -2432,7 +3065,13 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
 
   const handleWebMouseMove = (e: any) => {
     if (Platform.OS !== 'web') return;
-    if (activeToolRef.current === 'hand' || activeToolRef.current === 'text') return;
+    if (
+      activeToolRef.current === 'hand' ||
+      activeToolRef.current === 'text' ||
+      activeToolRef.current === 'stamp' ||
+      activeToolRef.current === 'comment'
+    )
+      return;
 
     const rect = e.currentTarget.getBoundingClientRect();
     const z = zoomLevelRef.current || 1.0;
@@ -2448,9 +3087,20 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
       return;
     }
 
+    if (activeToolRef.current === 'redact') {
+      if (redactDraftRectRef.current) {
+        const next = { ...redactDraftRectRef.current, currentX: x, currentY: y };
+        redactDraftRectRef.current = next;
+        setRedactDraftRect(next);
+      }
+      return;
+    }
+
     if (activeToolRef.current === 'snippet') {
       if (snippetDraftRectRef.current) {
-        setSnippetDraftRect((prev) => (prev ? { ...prev, currentX: x, currentY: y } : null));
+        const next = { ...snippetDraftRectRef.current, currentX: x, currentY: y };
+        snippetDraftRectRef.current = next;
+        setSnippetDraftRect(next);
       }
       return;
     }
@@ -2478,7 +3128,9 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
         return;
       }
       if (selectionRectRef.current) {
-        setSelectionRect((prev) => (prev ? { ...prev, currentX: x, currentY: y } : null));
+        const next = { ...selectionRectRef.current, currentX: x, currentY: y };
+        selectionRectRef.current = next;
+        setSelectionRect(next);
       }
       return;
     }
@@ -2541,7 +3193,13 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
       cancelAnimationFrame(rafStrokeIdRef.current);
       rafStrokeIdRef.current = null;
     }
-    if (activeToolRef.current === 'hand' || activeToolRef.current === 'text') return;
+    if (
+      activeToolRef.current === 'hand' ||
+      activeToolRef.current === 'text' ||
+      activeToolRef.current === 'stamp' ||
+      activeToolRef.current === 'comment'
+    )
+      return;
 
     if (activeToolRef.current === 'laser') {
       setLaserPoint(null);
@@ -2552,8 +3210,19 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
       return;
     }
 
+    if (activeToolRef.current === 'redact') {
+      const draft = redactDraftRectRef.current;
+      redactDraftRectRef.current = null;
+      setRedactDraftRect(null);
+      if (draft) {
+        finalizeRedactionRect(draft.startX, draft.startY, draft.currentX, draft.currentY);
+      }
+      return;
+    }
+
     if (activeToolRef.current === 'snippet') {
       const draft = snippetDraftRectRef.current;
+      snippetDraftRectRef.current = null;
       setSnippetDraftRect(null);
       if (draft) {
         finalizeSnippetCapture(draft.startX, draft.startY, draft.currentX, draft.currentY);
@@ -2695,14 +3364,20 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
       input.onchange = async (e: any) => {
         const file: File | undefined = e.target?.files?.[0];
         if (file) {
+          setExportToastMessage(`⏳ '${file.name}' 원본 PDF 렌더링 중...`);
           const parsed = await parseUploadedPdfFile(file);
           setTitle(parsed.fileName);
           setPdfPages(parsed.pages);
+          if (parsed.meta) setPdfMeta(parsed.meta);
           setTotalPages(parsed.pages.length);
           setCurrentPage(1);
           setIsPdfLauncherOpen(false);
-          setExportToastMessage(`📄 '${parsed.fileName}' (${parsed.pages.length}페이지) 문서를 불러왔습니다.`);
-          setTimeout(() => setExportToastMessage(null), 2500);
+          setExportToastMessage(
+            `📄 '${parsed.fileName}' (${parsed.pages.length}페이지 · ${
+              parsed.usedRealRenderer ? '원본 PDF 렌더링' : '경량 파서'
+            }) 문서를 불러왔습니다.`
+          );
+          setTimeout(() => setExportToastMessage(null), 2600);
         }
       };
       input.click();
@@ -2744,9 +3419,10 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
       <SafeAreaView style={styles.workspaceContainer} edges={['top', 'left', 'right', 'bottom']}>
         <PdfOpenLauncherView
           existingPdfNotes={existingPdfNotes}
-          onOpenUploadedPdf={(fileName, pages, initialTab) => {
+          onOpenUploadedPdf={(fileName, pages, initialTab, meta) => {
             setTitle(fileName);
             setPdfPages(pages);
+            if (meta) setPdfMeta(meta);
             setTotalPages(pages.length);
             setCurrentPage(1);
             setPdfWorkspaceTab(initialTab);
@@ -2790,6 +3466,12 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
             setTextBoxes(pickedNote.textBoxes || []);
             setAudioNotes(pickedNote.audioNotes || []);
             setPaperTemplate(pickedNote.paperTemplate || 'blank');
+            if (pickedNote.pdfWatermark) setPdfWatermark(pickedNote.pdfWatermark);
+            if (pickedNote.pdfHeaderFooter) setPdfHeaderFooter(pickedNote.pdfHeaderFooter);
+            setPdfStamps(pickedNote.pdfStamps || []);
+            setPdfRedactions(pickedNote.pdfRedactions || []);
+            setPdfComments(pickedNote.pdfComments || []);
+            setPdfMeta(pickedNote.pdfMeta || {});
             setBookmarkedPages(
               pickedNote.bookmarkedPages && pickedNote.bookmarkedPages.length > 0
                 ? pickedNote.bookmarkedPages
@@ -3168,6 +3850,111 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           </View>
 
           <View style={styles.acrobatRightGroup}>
+            {/* 보기 레이아웃 전환 (단일 / 연속 스크롤 / 양면 2쪽) */}
+            <View style={styles.viewLayoutSwitchPill}>
+              {(
+                [
+                  { id: 'single', label: '단일', icon: FileText },
+                  { id: 'continuous', label: '연속', icon: Rows3 },
+                  { id: 'two-up', label: '양면 2쪽', icon: Columns2 },
+                ] as const
+              ).map((ly) => {
+                const IconComp = ly.icon;
+                const isSel = viewLayout === ly.id && pdfWorkspaceTab === 'annotate';
+                return (
+                  <TouchableOpacity
+                    key={ly.id}
+                    style={[styles.viewLayoutBtn, isSel && styles.viewLayoutBtnActive]}
+                    onPress={() => {
+                      setPdfWorkspaceTab('annotate');
+                      setViewLayout(ly.id);
+                    }}
+                  >
+                    <IconComp size={11} color={isSel ? '#1D4ED8' : '#64748B'} />
+                    <Text style={[styles.viewLayoutBtnText, isSel && styles.viewLayoutBtnTextActive]}>
+                      {ly.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            {/* 워터마크 & 머리글/바닥글 */}
+            <TouchableOpacity
+              style={[
+                styles.acrobatToolMiniBtn,
+                (pdfWatermark.enabled || pdfHeaderFooter.enabled) && styles.acrobatToolMiniBtnActive,
+              ]}
+              onPress={() => setIsWatermarkModalOpen(true)}
+            >
+              <Droplets
+                size={12}
+                color={pdfWatermark.enabled || pdfHeaderFooter.enabled ? '#1D4ED8' : '#475569'}
+              />
+              <Text
+                style={[
+                  styles.acrobatToolMiniText,
+                  (pdfWatermark.enabled || pdfHeaderFooter.enabled) && { color: '#1D4ED8' },
+                ]}
+              >
+                워터마크·머리글
+              </Text>
+            </TouchableOpacity>
+
+            {/* 두 PDF 비교 */}
+            <TouchableOpacity
+              style={styles.acrobatToolMiniBtn}
+              onPress={() => setIsCompareModalOpen(true)}
+            >
+              <GitCompare size={12} color="#6D28D9" />
+              <Text style={styles.acrobatToolMiniText}>PDF 비교</Text>
+            </TouchableOpacity>
+
+            {/* 문서 속성 & 단어/주석 통계 */}
+            <TouchableOpacity
+              style={styles.acrobatToolMiniBtn}
+              onPress={() => setIsPropertiesModalOpen(true)}
+            >
+              <ChartBar size={12} color="#047857" />
+              <Text style={styles.acrobatToolMiniText}>
+                통계 ({documentWordStats.totalWords}단어)
+              </Text>
+            </TouchableOpacity>
+
+            {/* 스레드 댓글 드로어 토글 */}
+            <TouchableOpacity
+              style={[
+                styles.acrobatToolMiniBtn,
+                isCommentsDrawerOpen && styles.acrobatToolMiniBtnActive,
+              ]}
+              onPress={() => {
+                setPdfWorkspaceTab('annotate');
+                setIsCommentsDrawerOpen((p) => !p);
+              }}
+            >
+              <MessageSquare
+                size={12}
+                color={isCommentsDrawerOpen ? '#1D4ED8' : '#475569'}
+              />
+              <Text
+                style={[
+                  styles.acrobatToolMiniText,
+                  isCommentsDrawerOpen && { color: '#1D4ED8' },
+                ]}
+              >
+                댓글{pdfComments.length > 0 ? ` (${pdfComments.length})` : ''}
+              </Text>
+            </TouchableOpacity>
+
+            {/* Ctrl+K 명령 팔레트 */}
+            <TouchableOpacity
+              style={styles.acrobatCmdPaletteBtn}
+              onPress={() => setIsCommandPaletteOpen(true)}
+            >
+              <Command size={11} color="#FFFFFF" />
+              <Text style={styles.acrobatCmdPaletteText}>⌘K 명령</Text>
+            </TouchableOpacity>
+
             <TouchableOpacity
               style={[
                 styles.acrobatSnippetQuickBtn,
@@ -3198,7 +3985,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
                     styles.acrobatSnippetQuickTextActive,
                 ]}
               >
-                블록 복사 · 노트 발췌
+                블록 발췌
               </Text>
             </TouchableOpacity>
 
@@ -3207,7 +3994,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
               onPress={() => setIsPdfLauncherOpen(true)}
             >
               <Upload size={12} color="#2563EB" />
-              <Text style={styles.acrobatOpenHubText}>다른 PDF 열기 / 새 문서 허브</Text>
+              <Text style={styles.acrobatOpenHubText}>PDF 허브</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -3456,6 +4243,9 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
             onInsertBlankPageAfter={handleInsertBlankPageAfter}
             onMergePages={handleMergePages}
             onSplitPages={handleSplitPages}
+            onBatchRotatePages={handleBatchRotatePages}
+            onBatchDeletePages={handleBatchDeletePages}
+            onSplitEveryNPages={handleSplitEveryNPages}
           />
         ) : (
           <>
@@ -3603,11 +4393,19 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
                                   <Bookmark size={11} color="#F59E0B" fill="#F59E0B" />
                                 </View>
                               )}
-                              <Text style={styles.thumbnailPageContent} numberOfLines={4}>
-                                {isPdfMode && activeDocument?.pages[idx]
-                                  ? activeDocument.pages[idx].title
-                                  : `Page ${pNum} 노트`}
-                              </Text>
+                              {isPdfMode && pdfPages[idx]?.renderedImageUri ? (
+                                <Image
+                                  source={{ uri: pdfPages[idx].renderedImageUri }}
+                                  style={{ width: '100%', height: '100%' }}
+                                  resizeMode="contain"
+                                />
+                              ) : (
+                                <Text style={styles.thumbnailPageContent} numberOfLines={4}>
+                                  {isPdfMode && activeDocument?.pages[idx]
+                                    ? activeDocument.pages[idx].title
+                                    : `Page ${pNum} 노트`}
+                                </Text>
+                              )}
                             </View>
                             <Text style={[styles.thumbnailLabel, isSelected && styles.thumbnailLabelSelected]}>
                               페이지 {pNum}
@@ -3667,7 +4465,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           </View>
         )}
 
-        {/* 스크롤 가능한 메인 문서 A4 뷰 */}
+        {/* 스크롤 가능한 메인 문서 A4 뷰 (단일 / 연속 스크롤 / 양면 2쪽 지원) */}
         <ScrollView
           ref={canvasScrollRef}
           style={[
@@ -3676,7 +4474,11 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
               ? ({ cursor: isHandPanning ? 'grabbing' : 'grab', userSelect: 'none' } as any)
               : null,
           ]}
-          contentContainerStyle={styles.canvasScrollContent}
+          contentContainerStyle={[
+            styles.canvasScrollContent,
+            viewLayout === 'two-up' && styles.canvasScrollContentTwoUp,
+            viewLayout === 'continuous' && { gap: 28 },
+          ]}
           showsVerticalScrollIndicator={true}
           scrollEventThrottle={16}
           onScroll={(e) => {
@@ -3689,7 +4491,94 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
             ? ({ onMouseDown: startHandDragScroll } as any)
             : {})}
         >
-          {/* A4 스타일 문서 시트 (고해상도 그림자 및 경계선) */}
+          {/* 연속 세로 스크롤(Continuous) 모드: 현재 페이지 앞의 페이지들 렌더링 (클릭 시 즉시 해당 페이지 활성화) */}
+          {viewLayout === 'continuous' &&
+            Array.from({ length: Math.max(0, currentPage - 1) }).map((_, idx) => {
+              const pNum = idx + 1;
+              const pData = pdfPages[pNum - 1];
+              const pDoc = activeDocument?.pages[pNum - 1];
+              const pStrokes = strokes.filter((s) => (s.pageIndex || 1) === pNum);
+              const pStamps = pdfStamps.filter((st) => st.pageIndex === pNum);
+              const pRedactions = pdfRedactions.filter((r) => r.pageIndex === pNum);
+              return (
+                <TouchableOpacity
+                  key={`cont_prev_${pNum}`}
+                  activeOpacity={0.95}
+                  onPress={() => setCurrentPage(pNum)}
+                  style={[
+                    styles.a4PageSheet,
+                    styles.companionPageSheet,
+                    isNightMode && { backgroundColor: '#0F172A', borderColor: '#1E293B' },
+                  ]}
+                >
+                  {pData?.renderedImageUri ? (
+                    <Image
+                      source={{ uri: pData.renderedImageUri }}
+                      style={StyleSheet.absoluteFill}
+                      resizeMode="contain"
+                    />
+                  ) : pDoc ? (
+                    <View style={[styles.pdfPageContent, isNightMode && styles.pdfPageContentDark]}>
+                      <View style={styles.pdfHeaderRow}>
+                        <Text style={[styles.pdfDocTag, isNightMode && styles.pdfDocTagDark]}>
+                          StickyCraft Document
+                        </Text>
+                        <Text style={[styles.pdfPageTag, isNightMode && styles.pdfPageTagDark]}>
+                          PAGE {pNum} OF {totalPages}
+                        </Text>
+                      </View>
+                      <Text style={[styles.pdfPageTitle, isNightMode && styles.pdfPageTitleDark]}>
+                        {pDoc.title}
+                      </Text>
+                      <Text style={[styles.pdfPageSubtitle, isNightMode && styles.pdfPageSubtitleDark]}>
+                        {pDoc.subtitle}
+                      </Text>
+                      <View style={[styles.pdfDivider, isNightMode && styles.pdfDividerDark]} />
+                      <Text style={[styles.pdfBodyText, isNightMode && styles.pdfBodyTextDark]}>
+                        {pDoc.content}
+                      </Text>
+                    </View>
+                  ) : null}
+                  <Svg style={StyleSheet.absoluteFill} width="100%" height="100%" pointerEvents="none">
+                    <CommittedDocumentStrokesLayer strokes={pStrokes} selectedStrokeIds={[]} />
+                  </Svg>
+                  {pStamps.map((st) => (
+                    <View
+                      key={st.id}
+                      pointerEvents="none"
+                      style={[
+                        styles.pdfStampBadge,
+                        {
+                          left: st.x,
+                          top: st.y,
+                          borderColor: st.color,
+                          transform: [{ rotate: `${st.rotation ?? -8}deg` }],
+                        },
+                      ]}
+                    >
+                      <Text style={[styles.pdfStampLabel, { color: st.color }]}>{st.label}</Text>
+                    </View>
+                  ))}
+                  {pRedactions.map((rd) => (
+                    <View
+                      key={rd.id}
+                      pointerEvents="none"
+                      style={[
+                        styles.pdfRedactionBox,
+                        { left: rd.x, top: rd.y, width: rd.width, height: rd.height },
+                      ]}
+                    />
+                  ))}
+                  <View style={styles.companionFocusBadge} pointerEvents="none">
+                    <Text style={styles.companionFocusBadgeText}>
+                      P.{pNum} / {totalPages} · 클릭하여 이 페이지에 필기
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+              );
+            })}
+
+          {/* A4 스타일 활성 문서 시트 (고해상도 그림자 및 경계선) */}
           <View
             ref={pageContainerRef}
             style={[
@@ -3714,8 +4603,9 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
               setPageLayout({ width, height });
             }}
           >
-            {/* 속지 패턴 렌더링 (캔버스 모드이거나, 추가된 페이지이거나, 페이지별 템플릿이 지정된 경우) */}
-            {(!isPdfMode || pageTemplates[currentPage] || !activeDocument?.pages[currentPage - 1]) && (
+            {/* 속지 패턴 렌더링 (원본 PDF 이미지가 없을 때만 속지 표시) */}
+            {!pdfPages[currentPage - 1]?.renderedImageUri &&
+              (!isPdfMode || pageTemplates[currentPage] || !activeDocument?.pages[currentPage - 1]) && (
               <View style={StyleSheet.absoluteFill} pointerEvents="none">
                 <PaperTemplatePattern
                   template={isNightMode ? 'dark' : pageTemplates[currentPage] || paperTemplate}
@@ -3723,8 +4613,16 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
               </View>
             )}
 
-            {/* PDF 모드일 때 고품질 문서 본문 렌더링 */}
-            {isPdfMode && activeDocument?.pages[currentPage - 1] && (
+            {/* PDF 모드: 1순위 실제 PDF 원본 렌더링 이미지, 2순위 구조화 텍스트 본문 */}
+            {isPdfMode && pdfPages[currentPage - 1]?.renderedImageUri ? (
+              <View style={StyleSheet.absoluteFill} pointerEvents="none">
+                <Image
+                  source={{ uri: pdfPages[currentPage - 1].renderedImageUri }}
+                  style={{ width: '100%', height: '100%' }}
+                  resizeMode="contain"
+                />
+              </View>
+            ) : isPdfMode && activeDocument?.pages[currentPage - 1] ? (
               <View
                 style={[styles.pdfPageContent, isNightMode && styles.pdfPageContentDark]}
                 pointerEvents="none"
@@ -3748,9 +4646,43 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
                   {activeDocument.pages[currentPage - 1].content}
                 </Text>
               </View>
+            ) : null}
+
+            {/* 머리글 · 바닥글 · 자동 페이지 번호 오버레이 */}
+            {pdfHeaderFooter.enabled && (
+              <View style={StyleSheet.absoluteFill} pointerEvents="none">
+                {pdfHeaderFooter.headerText.trim() ? (
+                  <Text style={styles.pdfHeaderOverlayText}>{pdfHeaderFooter.headerText}</Text>
+                ) : null}
+                <View style={styles.pdfFooterOverlayRow}>
+                  <Text style={styles.pdfFooterOverlayText}>{pdfHeaderFooter.footerText}</Text>
+                  {pdfHeaderFooter.showPageNumbers && (
+                    <Text style={styles.pdfFooterOverlayPageNum}>
+                      {currentPage} / {totalPages}
+                    </Text>
+                  )}
+                </View>
+              </View>
             )}
 
-            {/* 손글씨 & 기하 도형 & PDF 블록 발췌 실시간 벡터 SVG 오버레이 레이어 */}
+            {/* 대각선 워터마크 오버레이 (기밀 CONFIDENTIAL / 초안 DRAFT 등) */}
+            {pdfWatermark.enabled && pdfWatermark.text.trim().length > 0 && (
+              <View style={styles.pdfWatermarkOverlay} pointerEvents="none">
+                <Text
+                  style={[
+                    styles.pdfWatermarkText,
+                    {
+                      color: pdfWatermark.color || '#DC2626',
+                      opacity: Math.max(0.05, Math.min(0.45, pdfWatermark.opacity || 0.14)),
+                    },
+                  ]}
+                >
+                  {pdfWatermark.text}
+                </Text>
+              </View>
+            )}
+
+            {/* 손글씨 & 기하 도형 & PDF 블록 발췌 & 먹칠 드래그 실시간 벡터 SVG 오버레이 레이어 */}
             <View
               style={[
                 StyleSheet.absoluteFill,
@@ -3812,6 +4744,20 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
                     strokeDasharray="6,4"
                     fill="rgba(245, 158, 11, 0.14)"
                     rx={4}
+                  />
+                )}
+
+                {/* 실시간 민감정보 먹칠(Redaction) 드래그 영역 프리뷰 */}
+                {redactDraftRect && (
+                  <Rect
+                    x={Math.min(redactDraftRect.startX, redactDraftRect.currentX)}
+                    y={Math.min(redactDraftRect.startY, redactDraftRect.currentY)}
+                    width={Math.max(1, Math.abs(redactDraftRect.currentX - redactDraftRect.startX))}
+                    height={Math.max(1, Math.abs(redactDraftRect.currentY - redactDraftRect.startY))}
+                    stroke="#EF4444"
+                    strokeWidth={2}
+                    fill="rgba(9, 9, 11, 0.85)"
+                    rx={2}
                   />
                 )}
 
@@ -3942,6 +4888,105 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
                 )}
               </Svg>
             </View>
+
+            {/* 스탬프 배지 레이어 (승인 / 초안 / 검토 완료 / 중요 / 기밀) */}
+            {pdfStamps
+              .filter((st) => st.pageIndex === currentPage)
+              .map((st) => (
+                <View
+                  key={st.id}
+                  pointerEvents={
+                    activeTool === 'stamp' || activeTool === 'eraser' ? 'auto' : 'none'
+                  }
+                  style={[
+                    styles.pdfStampBadge,
+                    {
+                      left: st.x,
+                      top: st.y,
+                      borderColor: st.color,
+                      transform: [{ rotate: `${st.rotation ?? -8}deg` }],
+                    },
+                  ]}
+                >
+                  <View style={[styles.pdfStampInnerBorder, { borderColor: st.color }]}>
+                    <Text style={[styles.pdfStampLabel, { color: st.color }]}>{st.label}</Text>
+                    {st.sublabel ? (
+                      <Text style={[styles.pdfStampSublabel, { color: st.color }]}>
+                        {st.sublabel}
+                      </Text>
+                    ) : null}
+                  </View>
+                  {(activeTool === 'stamp' || activeTool === 'eraser') && (
+                    <TouchableOpacity
+                      style={styles.overlayRemoveCircle}
+                      onPress={() =>
+                        setPdfStamps((prev) => prev.filter((item) => item.id !== st.id))
+                      }
+                    >
+                      <X size={10} color="#FFFFFF" />
+                    </TouchableOpacity>
+                  )}
+                </View>
+              ))}
+
+            {/* 민감정보 먹칠/가림 박스 레이어 (Redactions) */}
+            {pdfRedactions
+              .filter((rd) => rd.pageIndex === currentPage)
+              .map((rd) => (
+                <View
+                  key={rd.id}
+                  pointerEvents={
+                    activeTool === 'redact' || activeTool === 'eraser' ? 'auto' : 'none'
+                  }
+                  style={[
+                    styles.pdfRedactionBox,
+                    {
+                      left: rd.x,
+                      top: rd.y,
+                      width: rd.width,
+                      height: rd.height,
+                    },
+                  ]}
+                >
+                  <Text style={styles.pdfRedactionLabel}>{rd.reason || 'REDACTED'}</Text>
+                  {(activeTool === 'redact' || activeTool === 'eraser') && (
+                    <TouchableOpacity
+                      style={styles.overlayRemoveCircle}
+                      onPress={() =>
+                        setPdfRedactions((prev) => prev.filter((item) => item.id !== rd.id))
+                      }
+                    >
+                      <X size={10} color="#FFFFFF" />
+                    </TouchableOpacity>
+                  )}
+                </View>
+              ))}
+
+            {/* 스레드 댓글 핀 레이어 (클릭 시 우측 댓글 드로어에서 해당 스레드 포커스) */}
+            {pdfComments
+              .filter((cm) => cm.pageIndex === currentPage)
+              .map((cm) => {
+                const threadNumber = pdfComments.findIndex((t) => t.id === cm.id) + 1;
+                const isSelected = activeCommentThreadId === cm.id;
+                return (
+                  <TouchableOpacity
+                    key={cm.id}
+                    style={[
+                      styles.pdfCommentPin,
+                      { left: cm.x, top: cm.y },
+                      cm.resolved && styles.pdfCommentPinResolved,
+                      isSelected && styles.pdfCommentPinSelected,
+                    ]}
+                    onPress={() => {
+                      setActiveCommentThreadId(cm.id);
+                      setIsCommentsDrawerOpen(true);
+                    }}
+                  >
+                    <MessageSquare size={12} color="#FFFFFF" />
+                    <Text style={styles.pdfCommentPinText}>#{threadNumber}</Text>
+                  </TouchableOpacity>
+                );
+              })}
 
             {/* 올가미 선택 영역 바운딩 박스 & 플로팅 액션 바 (복제 / 색상변경 / 삭제 / 닫기) */}
             {selectionBBox && selectedStrokeIds.length > 0 && (
@@ -4160,7 +5205,166 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
                 />
               ))}
           </View>
+
+          {/* 양면 나란히 보기(Two-Up) 또는 연속 세로 스크롤(Continuous): 뒤따르는 페이지 렌더링 */}
+          {(() => {
+            const followingPages: number[] = [];
+            if (viewLayout === 'continuous') {
+              for (let p = currentPage + 1; p <= totalPages; p++) followingPages.push(p);
+            } else if (viewLayout === 'two-up' && totalPages > 1) {
+              const facing = currentPage < totalPages ? currentPage + 1 : currentPage - 1;
+              if (facing >= 1 && facing <= totalPages && facing !== currentPage) {
+                followingPages.push(facing);
+              }
+            }
+            return followingPages.map((pNum) => {
+              const pData = pdfPages[pNum - 1];
+              const pDoc = activeDocument?.pages[pNum - 1];
+              const pStrokes = strokes.filter((s) => (s.pageIndex || 1) === pNum);
+              const pStamps = pdfStamps.filter((st) => st.pageIndex === pNum);
+              const pRedactions = pdfRedactions.filter((r) => r.pageIndex === pNum);
+              return (
+                <TouchableOpacity
+                  key={`comp_next_${pNum}`}
+                  activeOpacity={0.95}
+                  onPress={() => setCurrentPage(pNum)}
+                  style={[
+                    styles.a4PageSheet,
+                    styles.companionPageSheet,
+                    isNightMode && { backgroundColor: '#0F172A', borderColor: '#1E293B' },
+                  ]}
+                >
+                  {pData?.renderedImageUri ? (
+                    <Image
+                      source={{ uri: pData.renderedImageUri }}
+                      style={StyleSheet.absoluteFill}
+                      resizeMode="contain"
+                    />
+                  ) : pDoc ? (
+                    <View style={[styles.pdfPageContent, isNightMode && styles.pdfPageContentDark]}>
+                      <View style={styles.pdfHeaderRow}>
+                        <Text style={[styles.pdfDocTag, isNightMode && styles.pdfDocTagDark]}>
+                          StickyCraft Document
+                        </Text>
+                        <Text style={[styles.pdfPageTag, isNightMode && styles.pdfPageTagDark]}>
+                          PAGE {pNum} OF {totalPages}
+                        </Text>
+                      </View>
+                      <Text style={[styles.pdfPageTitle, isNightMode && styles.pdfPageTitleDark]}>
+                        {pDoc.title}
+                      </Text>
+                      <Text style={[styles.pdfPageSubtitle, isNightMode && styles.pdfPageSubtitleDark]}>
+                        {pDoc.subtitle}
+                      </Text>
+                      <View style={[styles.pdfDivider, isNightMode && styles.pdfDividerDark]} />
+                      <Text style={[styles.pdfBodyText, isNightMode && styles.pdfBodyTextDark]}>
+                        {pDoc.content}
+                      </Text>
+                    </View>
+                  ) : null}
+                  {pdfWatermark.enabled && pdfWatermark.text.trim().length > 0 && (
+                    <View style={styles.pdfWatermarkOverlay} pointerEvents="none">
+                      <Text
+                        style={[
+                          styles.pdfWatermarkText,
+                          {
+                            color: pdfWatermark.color || '#DC2626',
+                            opacity: Math.max(0.05, Math.min(0.45, pdfWatermark.opacity || 0.14)),
+                          },
+                        ]}
+                      >
+                        {pdfWatermark.text}
+                      </Text>
+                    </View>
+                  )}
+                  <Svg style={StyleSheet.absoluteFill} width="100%" height="100%" pointerEvents="none">
+                    <CommittedDocumentStrokesLayer strokes={pStrokes} selectedStrokeIds={[]} />
+                  </Svg>
+                  {pStamps.map((st) => (
+                    <View
+                      key={st.id}
+                      pointerEvents="none"
+                      style={[
+                        styles.pdfStampBadge,
+                        {
+                          left: st.x,
+                          top: st.y,
+                          borderColor: st.color,
+                          transform: [{ rotate: `${st.rotation ?? -8}deg` }],
+                        },
+                      ]}
+                    >
+                      <Text style={[styles.pdfStampLabel, { color: st.color }]}>{st.label}</Text>
+                    </View>
+                  ))}
+                  {pRedactions.map((rd) => (
+                    <View
+                      key={rd.id}
+                      pointerEvents="none"
+                      style={[
+                        styles.pdfRedactionBox,
+                        { left: rd.x, top: rd.y, width: rd.width, height: rd.height },
+                      ]}
+                    />
+                  ))}
+                  <View style={styles.companionFocusBadge} pointerEvents="none">
+                    <Text style={styles.companionFocusBadgeText}>
+                      P.{pNum} / {totalPages} · 클릭하여 이 페이지에 필기
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+              );
+            });
+          })()}
         </ScrollView>
+
+        {/* 우측 스레드 댓글 검토 드로어 */}
+        {isCommentsDrawerOpen && (
+          <PdfCommentsDrawer
+            comments={pdfComments}
+            activeThreadId={activeCommentThreadId}
+            currentPage={currentPage}
+            onSelectThread={(thread) => {
+              setActiveCommentThreadId(thread.id);
+              setCurrentPage(thread.pageIndex);
+            }}
+            onReplyThread={(threadId, replyText) => {
+              setPdfComments((prev) =>
+                prev.map((t) =>
+                  t.id === threadId
+                    ? {
+                        ...t,
+                        messages: [
+                          ...t.messages,
+                          {
+                            id: `cmsg_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
+                            author: pdfMeta.author || '검토자',
+                            text: replyText,
+                            createdAt: Date.now(),
+                          },
+                        ],
+                      }
+                    : t
+                )
+              );
+            }}
+            onToggleResolved={(threadId) => {
+              setPdfComments((prev) =>
+                prev.map((t) => (t.id === threadId ? { ...t, resolved: !t.resolved } : t))
+              );
+            }}
+            onDeleteThread={(threadId) => {
+              setPdfComments((prev) => prev.filter((t) => t.id !== threadId));
+              if (activeCommentThreadId === threadId) setActiveCommentThreadId(null);
+            }}
+            onStartPlaceComment={() => {
+              setActiveTool('comment');
+              setExportToastMessage('💬 문서 위 원하는 위치를 클릭하면 스레드 댓글 핀이 생성됩니다!');
+              setTimeout(() => setExportToastMessage(null), 2200);
+            }}
+            onClose={() => setIsCommentsDrawerOpen(false)}
+          />
+        )}
 
         {/* Flexcil / LiquidText 스타일 우측 분할 사이드 노트 패널 */}
         {isSideNoteOpen && (
@@ -4482,7 +5686,83 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           </View>
         )}
 
-        {/* 활성 도구 안내 뱃지 (레이저 포인터 / 직사각형 선택 모드) */}
+        {activeTool === 'stamp' && (
+          <View style={styles.subShapeToolbox}>
+            <Stamp size={13} color="#DC2626" />
+            <Text style={styles.subShapeLabel}>스탬프 선택 (클릭하여 찍기):</Text>
+            {STAMP_PRESETS.map((preset, idx) => {
+              const isCur = activeStampPresetIdx === idx;
+              return (
+                <TouchableOpacity
+                  key={preset.label}
+                  style={[
+                    styles.subShapeBtn,
+                    isCur && { backgroundColor: '#FEF2F2', borderColor: preset.color, borderWidth: 1 },
+                  ]}
+                  onPress={() => setActiveStampPresetIdx(idx)}
+                >
+                  <View
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: 4,
+                      backgroundColor: preset.color,
+                    }}
+                  />
+                  <Text
+                    style={[
+                      styles.subShapeBtnText,
+                      isCur && { color: preset.color, fontWeight: '800' },
+                    ]}
+                  >
+                    {preset.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+            {pdfStamps.some((s) => s.pageIndex === currentPage) && (
+              <TouchableOpacity
+                style={styles.clearPageFloatingBtn}
+                onPress={() =>
+                  setPdfStamps((prev) => prev.filter((s) => s.pageIndex !== currentPage))
+                }
+              >
+                <Trash2 size={12} color="#DC2626" />
+                <Text style={styles.clearPageFloatingText}>P.{currentPage} 스탬프 지우기</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
+
+        {activeTool === 'redact' && (
+          <View style={styles.subShapeToolbox}>
+            <EyeOff size={13} color="#09090B" />
+            <Text style={styles.subShapeLabel}>
+              ⬛ 민감정보 먹칠(Redaction): 가릴 영역을 드래그하세요 (블록 발췌 및 PDF 저장 시 영구 마스킹)
+            </Text>
+            {pdfRedactions.some((r) => r.pageIndex === currentPage) && (
+              <TouchableOpacity
+                style={styles.clearPageFloatingBtn}
+                onPress={() =>
+                  setPdfRedactions((prev) => prev.filter((r) => r.pageIndex !== currentPage))
+                }
+              >
+                <Trash2 size={12} color="#DC2626" />
+                <Text style={styles.clearPageFloatingText}>P.{currentPage} 먹칠 해제</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
+
+        {/* 활성 도구 안내 뱃지 (레이저 포인터 / 직사각형 선택 / 댓글 핀 모드) */}
+        {activeTool === 'comment' && (
+          <View style={styles.toolGuideBadgeBlue}>
+            <MessageSquare size={13} color="#2563EB" />
+            <Text style={styles.toolGuideBadgeBlueText}>
+              💬 스레드 댓글 핀 모드: 문서 위 원하는 위치를 클릭하면 댓글 핀이 찍히고 우측 스레드 창이 열립니다
+            </Text>
+          </View>
+        )}
         {activeTool === 'laser' && (
           <View style={styles.toolGuideBadgeRed}>
             <Presentation size={13} color="#EF4444" />
@@ -4604,7 +5884,60 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
             <Crop size={19} color={activeTool === 'snippet' ? '#FFFFFF' : '#D97706'} />
           </TouchableOpacity>
 
-          {/* 9. 프레젠테이션 레이저 포인터 (발표/강조용: 0.5초 후 자동 소멸) */}
+          {/* 9. 스탬프 도구 (승인 / 초안 / 검토 완료 / 중요 / 기밀) */}
+          <TouchableOpacity
+            style={[
+              styles.toolBtn,
+              activeTool === 'stamp' && { backgroundColor: '#DC2626' },
+            ]}
+            onPress={() => {
+              setActiveTool('stamp');
+              setSelectedStrokeIds([]);
+              setSelectionBBox(null);
+            }}
+            {...(Platform.OS === 'web'
+              ? ({ title: '공식 스탬프 찍기 (승인 / 초안 / 검토 완료 / 기밀)' } as any)
+              : {})}
+          >
+            <Stamp size={18} color={activeTool === 'stamp' ? '#FFFFFF' : '#DC2626'} />
+          </TouchableOpacity>
+
+          {/* 10. 민감정보 먹칠/가림 도구 (Redaction) */}
+          <TouchableOpacity
+            style={[
+              styles.toolBtn,
+              activeTool === 'redact' && { backgroundColor: '#09090B' },
+            ]}
+            onPress={() => {
+              setActiveTool('redact');
+              setSelectedStrokeIds([]);
+              setSelectionBBox(null);
+            }}
+            {...(Platform.OS === 'web'
+              ? ({ title: '민감정보 먹칠/가림 (드래그하여 영구 마스킹)' } as any)
+              : {})}
+          >
+            <EyeOff size={18} color={activeTool === 'redact' ? '#FFFFFF' : '#0F172A'} />
+          </TouchableOpacity>
+
+          {/* 11. 위치 기반 스레드 댓글 핀 도구 */}
+          <TouchableOpacity
+            style={[
+              styles.toolBtn,
+              activeTool === 'comment' && { backgroundColor: '#2563EB' },
+            ]}
+            onPress={() => {
+              setActiveTool('comment');
+              setIsCommentsDrawerOpen(true);
+            }}
+            {...(Platform.OS === 'web'
+              ? ({ title: '위치 기반 스레드 댓글 핀 추가' } as any)
+              : {})}
+          >
+            <MessageSquare size={18} color={activeTool === 'comment' ? '#FFFFFF' : '#2563EB'} />
+          </TouchableOpacity>
+
+          {/* 12. 프레젠테이션 레이저 포인터 (발표/강조용: 0.5초 후 자동 소멸) */}
           <TouchableOpacity
             style={[styles.toolBtn, activeTool === 'laser' && styles.toolBtnActiveLaser]}
             onPress={() => {
@@ -4847,6 +6180,40 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
 
             <View style={styles.exportOptionsList}>
               <TouchableOpacity
+                style={[styles.exportOptionItem, { borderColor: '#FECACA', backgroundColor: '#FEF2F2' }]}
+                onPress={handleExportRealPdfBinary}
+              >
+                <View style={[styles.exportOptionIconBox, { backgroundColor: '#FEE2E2' }]}>
+                  <FileDown size={20} color="#DC2626" />
+                </View>
+                <View style={styles.exportOptionTextBox}>
+                  <Text style={[styles.exportOptionTitle, { color: '#991B1B' }]}>
+                    실제 PDF 파일로 저장 (.pdf 바이너리 다운로드)
+                  </Text>
+                  <Text style={styles.exportOptionDesc}>
+                    원본 PDF 페이지, 필기, 도형, 스탬프, 워터마크, 머리글, 먹칠이 모두 반영된 정식 .pdf 파일을 즉시 다운로드합니다.
+                  </Text>
+                </View>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.exportOptionItem}
+                onPress={handleExportCurrentPagePng}
+              >
+                <View style={[styles.exportOptionIconBox, { backgroundColor: '#FEF3C7' }]}>
+                  <ImageDown size={20} color="#D97706" />
+                </View>
+                <View style={styles.exportOptionTextBox}>
+                  <Text style={styles.exportOptionTitle}>
+                    현재 페이지(P.{currentPage}) 고해상도 PNG 이미지 저장 (.png)
+                  </Text>
+                  <Text style={styles.exportOptionDesc}>
+                    현재 페이지와 모든 주석을 2x HiDPI 고화질 PNG 이미지 파일로 내보냅니다.
+                  </Text>
+                </View>
+              </TouchableOpacity>
+
+              <TouchableOpacity
                 style={styles.exportOptionItem}
                 onPress={handleExportPdfOrPrint}
                 {...(Platform.OS === 'web' ? ({ onClick: handleExportPdfOrPrint } as any) : {})}
@@ -4855,8 +6222,8 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
                   <Printer size={20} color="#2563EB" />
                 </View>
                 <View style={styles.exportOptionTextBox}>
-                  <Text style={styles.exportOptionTitle}>인쇄 및 PDF로 내보내기</Text>
-                  <Text style={styles.exportOptionDesc}>문서 본문과 필기를 통합하여 A4 규격으로 인쇄하거나 PDF로 저장합니다.</Text>
+                  <Text style={styles.exportOptionTitle}>브라우저 인쇄 대화상자 열기</Text>
+                  <Text style={styles.exportOptionDesc}>시스템 인쇄창을 열어 프린터로 직접 출력합니다.</Text>
                 </View>
               </TouchableOpacity>
 
@@ -5236,6 +6603,42 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           </View>
         </TouchableOpacity>
       </Modal>
+
+      {/* Stage 2 PDF 워크벤치 오버레이 모달 (Ctrl+K 명령 팔레트, 워터마크·머리글, 속성·통계, PDF 비교) */}
+      <PdfCommandPaletteModal
+        visible={isCommandPaletteOpen}
+        commands={commandPaletteItems}
+        onClose={() => setIsCommandPaletteOpen(false)}
+      />
+
+      <PdfWatermarkHeaderModal
+        visible={isWatermarkModalOpen}
+        watermark={pdfWatermark}
+        headerFooter={pdfHeaderFooter}
+        onChangeWatermark={setPdfWatermark}
+        onChangeHeaderFooter={setPdfHeaderFooter}
+        onClose={() => setIsWatermarkModalOpen(false)}
+      />
+
+      <PdfPropertiesStatsModal
+        visible={isPropertiesModalOpen}
+        title={title}
+        currentPage={currentPage}
+        meta={pdfMeta}
+        stats={documentWordStats}
+        onChangeTitle={setTitle}
+        onChangeMeta={setPdfMeta}
+        onClose={() => setIsPropertiesModalOpen(false)}
+      />
+
+      <PdfCompareModal
+        visible={isCompareModalOpen}
+        currentTitle={title}
+        currentPages={pdfPages}
+        allNotes={notes}
+        currentNoteId={activeNoteId}
+        onClose={() => setIsCompareModalOpen(false)}
+      />
 
       {/* 8. 알림 토스트 배너 */}
       {exportToastMessage && (
@@ -7036,5 +8439,221 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#7C3AED',
   },
+  // Stage 1 + Stage 2 PDF 워크벤치 스타일 (보기 레이아웃, 워터마크, 스탬프, 먹칠, 댓글 핀)
+  viewLayoutSwitchPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F1F5F9',
+    borderRadius: 8,
+    padding: 2,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  viewLayoutBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  viewLayoutBtnActive: {
+    backgroundColor: '#FFFFFF',
+  },
+  viewLayoutBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#64748B',
+  },
+  viewLayoutBtnTextActive: {
+    color: '#1D4ED8',
+    fontWeight: '800',
+  },
+  acrobatToolMiniBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 8,
+  },
+  acrobatToolMiniBtnActive: {
+    backgroundColor: '#EFF6FF',
+    borderColor: '#93C5FD',
+  },
+  acrobatToolMiniText: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    color: '#334155',
+  },
+  acrobatCmdPaletteBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#1E293B',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 8,
+  },
+  acrobatCmdPaletteText: {
+    fontSize: 11.5,
+    fontWeight: '800',
+    color: '#FFFFFF',
+  },
+  canvasScrollContentTwoUp: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    alignItems: 'flex-start',
+    gap: 22,
+  },
+  companionPageSheet: {
+    borderWidth: 2,
+    borderColor: '#60A5FA',
+    opacity: 0.96,
+  },
+  companionFocusBadge: {
+    position: 'absolute',
+    bottom: 14,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(30, 41, 59, 0.86)',
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 16,
+  },
+  companionFocusBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 11.5,
+    fontWeight: '800',
+  },
+  pdfHeaderOverlayText: {
+    position: 'absolute',
+    top: 12,
+    left: 28,
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#64748B',
+  },
+  pdfFooterOverlayRow: {
+    position: 'absolute',
+    bottom: 10,
+    left: 28,
+    right: 28,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  pdfFooterOverlayText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#64748B',
+  },
+  pdfFooterOverlayPageNum: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#475569',
+  },
+  pdfWatermarkOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pdfWatermarkText: {
+    fontSize: 56,
+    fontWeight: '900',
+    letterSpacing: 3,
+    textAlign: 'center',
+    transform: [{ rotate: '-35deg' }],
+  },
+  pdfStampBadge: {
+    position: 'absolute',
+    width: 144,
+    minHeight: 46,
+    backgroundColor: 'rgba(255, 255, 255, 0.90)',
+    borderWidth: 2.5,
+    borderRadius: 6,
+    padding: 3,
+    zIndex: 55,
+  },
+  pdfStampInnerBorder: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: 3,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 4,
+    paddingHorizontal: 6,
+  },
+  pdfStampLabel: {
+    fontSize: 13.5,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
+  pdfStampSublabel: {
+    fontSize: 8.5,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    marginTop: 1,
+  },
+  pdfRedactionBox: {
+    position: 'absolute',
+    backgroundColor: '#09090B',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 2,
+    zIndex: 58,
+  },
+  pdfRedactionLabel: {
+    color: '#94A3B8',
+    fontSize: 9.5,
+    fontWeight: '800',
+    letterSpacing: 1,
+  },
+  overlayRemoveCircle: {
+    position: 'absolute',
+    top: -8,
+    right: -8,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#EF4444',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pdfCommentPin: {
+    position: 'absolute',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: '#2563EB',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 14,
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    zIndex: 59,
+    ...Platform.select({
+      web: {
+        cursor: 'pointer',
+        boxShadow: '0 4px 12px rgba(37, 99, 235, 0.35)',
+      },
+    }),
+  },
+  pdfCommentPinResolved: {
+    backgroundColor: '#10B981',
+  },
+  pdfCommentPinSelected: {
+    backgroundColor: '#D97706',
+    transform: [{ scale: 1.08 }],
+  },
+  pdfCommentPinText: {
+    color: '#FFFFFF',
+    fontSize: 10.5,
+    fontWeight: '900',
+  },
 });
+
 

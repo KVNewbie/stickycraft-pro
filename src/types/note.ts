@@ -141,6 +141,8 @@ export type SortOption = 'updated' | 'created' | 'title' | 'color' | 'reminder';
 
 export type LunarDisplayMode = 'none' | 'all' | 'key_days';
 
+export type PdfViewLayout = 'single' | 'continuous' | 'two-up';
+
 export interface PdfPageData {
   id: string;
   pageNumber: number;
@@ -148,6 +150,66 @@ export interface PdfPageData {
   subtitle?: string;
   content: string;
   sourcePdfName?: string;
+  renderedImageUri?: string; // 실제 .pdf 원본 렌더링 이미지 또는 이미지→PDF 변환 페이지 Data URL
+  aspectRatio?: number; // 페이지 원본 width / height 비율
+}
+
+export interface PdfWatermarkConfig {
+  enabled: boolean;
+  text: string;
+  opacity: number; // 0.05 ~ 0.45
+  color: string;
+}
+
+export interface PdfHeaderFooterConfig {
+  enabled: boolean;
+  headerText: string;
+  footerText: string;
+  showPageNumbers: boolean;
+}
+
+export interface PdfStampItem {
+  id: string;
+  pageIndex: number;
+  x: number;
+  y: number;
+  label: string;
+  sublabel?: string;
+  color: string;
+  rotation?: number;
+}
+
+export interface PdfRedactionRect {
+  id: string;
+  pageIndex: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  reason?: string;
+}
+
+export interface PdfCommentMessage {
+  id: string;
+  author: string;
+  text: string;
+  createdAt: number;
+}
+
+export interface PdfCommentThread {
+  id: string;
+  pageIndex: number;
+  x: number;
+  y: number;
+  resolved: boolean;
+  createdAt: number;
+  messages: PdfCommentMessage[];
+}
+
+export interface PdfDocumentMeta {
+  author?: string;
+  subject?: string;
+  keywords?: string;
 }
 
 export interface Note {
@@ -188,7 +250,13 @@ export interface Note {
   noteType?: 'text' | 'checklist' | 'canvas' | 'pdf'; // 메모 고유 유형
   pdfUri?: string; // 첨부된 PDF/문서 URI
   pdfName?: string; // 문서 파일명
-  pdfPages?: PdfPageData[]; // PDF 개별 페이지 데이터 (편집/병합/분할 지원)
+  pdfPages?: PdfPageData[]; // PDF 개별 페이지 데이터 (원본 렌더링/편집/병합/분할 지원)
+  pdfWatermark?: PdfWatermarkConfig; // 대각선 워터마크 설정
+  pdfHeaderFooter?: PdfHeaderFooterConfig; // 머리글·바닥글·페이지 번호 설정
+  pdfStamps?: PdfStampItem[]; // 스탬프(승인/초안/기밀/중요 등)
+  pdfRedactions?: PdfRedactionRect[]; // 민감정보 먹칠/가림 영역
+  pdfComments?: PdfCommentThread[]; // 위치 기반 스레드 댓글
+  pdfMeta?: PdfDocumentMeta; // 문서 속성(저자/주제/키워드)
   textBoxes?: FreeTextBox[]; // PDF 및 캔버스 자유 텍스트 상자
   bookmarkedPages?: number[]; // Jnotes, Notewise, Goodnotes 스타일 즐겨찾기/책갈피 페이지 번호 목록
   pageTemplates?: Record<number, PaperTemplate>; // 페이지별 개별 속지 템플릿 (줄노트, 모눈, 코넬 등)

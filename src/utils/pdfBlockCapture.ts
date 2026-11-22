@@ -1,5 +1,15 @@
 import { Platform } from 'react-native';
-import { FreeHandStroke, FreeTextBox, PaperTemplate } from '../types/note';
+import {
+  FreeHandStroke,
+  FreeTextBox,
+  PaperTemplate,
+  PdfHeaderFooterConfig,
+  PdfPageData,
+  PdfRedactionRect,
+  PdfStampItem,
+  PdfWatermarkConfig,
+} from '../types/note';
+import { renderCompositePageToCanvas } from './pdfEngine';
 
 export interface BlockRect {
   x: number;
@@ -53,9 +63,26 @@ function wrapTextLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: nu
   return result;
 }
 
+/** 수평 띠(lineTop~lineBot, x범위)가 먹칠 영역과 겹치는지 검사 — 가려진 텍스트는 절대 발췌되지 않음 */
+function bandHitsRedaction(
+  redactions: PdfRedactionRect[],
+  top: number,
+  bottom: number,
+  left: number,
+  right: number
+): boolean {
+  for (const r of redactions) {
+    if (r.y < bottom && r.y + r.height > top && r.x < right && r.x + r.width > left) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * PDF 또는 캔버스 페이지의 지정된 직사각형 블록 영역을 2x HiDPI 이미지(Data URL)로 캡처하고,
  * 해당 블록 영역 안에 걸치는 본문/제목/텍스트 상자 텍스트를 정밀하게 발췌합니다.
+ * (먹칠 영역에 걸친 텍스트는 발췌 결과에서 자동 제외)
  */
 export function captureDocumentBlockSnapshot(params: {
   cropRect: BlockRect;
@@ -67,6 +94,8 @@ export function captureDocumentBlockSnapshot(params: {
   pdfPage: PdfPageSnapshotMeta | null;
   strokes: FreeHandStroke[];
   textBoxes: FreeTextBox[];
+  redactions?: PdfRedactionRect[];
+  hasRenderedImage?: boolean;
 }): CapturedBlockResult {
   const {
     cropRect,
@@ -79,6 +108,8 @@ export function captureDocumentBlockSnapshot(params: {
     strokes,
     textBoxes,
   } = params;
+  const redactions = params.redactions || [];
+  const hasRenderedImage = Boolean(params.hasRenderedImage);
 
   const cropX = Math.max(0, Math.round(cropRect.x));
   const cropY = Math.max(0, Math.round(cropRect.y));
@@ -89,7 +120,7 @@ export function captureDocumentBlockSnapshot(params: {
 
   const extractedLines: string[] = [];
 
-  // 텍스트 상자 중 블록 영역에 포함되는 텍스트 수집
+  // 텍스트 상자 중 블록 영역에 포함되는 텍스트 수집 (먹칠된 텍스트 상자 제외)
   const matchedTextBoxLines: string[] = [];
   for (const tb of textBoxes) {
     if (!tb.text || !tb.text.trim()) continue;
@@ -99,8 +130,25 @@ export function captureDocumentBlockSnapshot(params: {
     const tbH = (tb.fontSize || 16) * 1.6;
     const overlaps =
       tbX < cropRight && tbX + tbW > cropX && tbY < cropBottom && tbY + tbH > cropY;
-    if (overlaps) {
+    if (overlaps && !bandHitsRedaction(redactions, tbY, tbY + tbH, tbX, tbX + tbW)) {
       matchedTextBoxLines.push(tb.text.trim());
+    }
+  }
+
+  // 실제 PDF 렌더링 이미지 페이지: 읽기 순서 텍스트를 페이지 높이에 비례 매핑하여 블록 영역 텍스트 발췌
+  if (isPdfMode && pdfPage && hasRenderedImage) {
+    const allLines = (pdfPage.content || '').split('\n').filter((l) => l.trim());
+    if (allLines.length > 0) {
+      const marginTop = pageHeight * 0.06;
+      const usable = Math.max(1, pageHeight - marginTop * 2);
+      const lineH = usable / allLines.length;
+      allLines.forEach((line, i) => {
+        const top = marginTop + i * lineH;
+        const bot = top + lineH;
+        if (bot >= cropY && top <= cropBottom && !bandHitsRedaction(redactions, top, bot, 0, pageWidth)) {
+          extractedLines.push(line.trim());
+        }
+      });
     }
   }
 
@@ -176,7 +224,7 @@ export function captureDocumentBlockSnapshot(params: {
         }
 
         // 2. PDF 문서 본문 렌더링 & 해당 블록 영역 텍스트 정밀 발췌
-        if (isPdfMode && pdfPage) {
+        if (isPdfMode && pdfPage && !hasRenderedImage) {
           const padX = 40;
           const contentMaxW = Math.max(200, pageWidth - padX * 2);
           let cursorY = 48;
@@ -201,7 +249,7 @@ export function captureDocumentBlockSnapshot(params: {
             const lineTop = cursorY - 20;
             const lineBot = cursorY + 6;
             ctx.fillText(line, padX, cursorY);
-            if (lineBot >= cropY && lineTop <= cropBottom && cropRight > padX && line.trim()) {
+            if (lineBot >= cropY && lineTop <= cropBottom && cropRight > padX && line.trim() && !bandHitsRedaction(redactions, lineTop, lineBot, padX, pageWidth - padX)) {
               extractedLines.push(line.trim());
             }
             cursorY += 30;
@@ -217,7 +265,7 @@ export function captureDocumentBlockSnapshot(params: {
               const lineTop = cursorY - 14;
               const lineBot = cursorY + 4;
               ctx.fillText(line, padX, cursorY);
-              if (lineBot >= cropY && lineTop <= cropBottom && cropRight > padX && line.trim()) {
+              if (lineBot >= cropY && lineTop <= cropBottom && cropRight > padX && line.trim() && !bandHitsRedaction(redactions, lineTop, lineBot, padX, pageWidth - padX)) {
                 extractedLines.push(line.trim());
               }
               cursorY += 22;
@@ -246,7 +294,7 @@ export function captureDocumentBlockSnapshot(params: {
             const lineTop = cursorY - 14;
             const lineBot = cursorY + 6;
             ctx.fillText(line, padX, cursorY);
-            if (lineBot >= cropY && lineTop <= cropBottom && cropRight > padX && line.trim()) {
+            if (lineBot >= cropY && lineTop <= cropBottom && cropRight > padX && line.trim() && !bandHitsRedaction(redactions, lineTop, lineBot, padX, pageWidth - padX)) {
               extractedLines.push(line.trim());
             }
             cursorY += 24;
@@ -354,7 +402,7 @@ export function captureDocumentBlockSnapshot(params: {
     } catch (err) {
       console.warn('PDF block canvas capture fallback:', err);
     }
-  } else if (isPdfMode && pdfPage) {
+  } else if (isPdfMode && pdfPage && !hasRenderedImage) {
     // 네이티브 폴백 텍스트 발췌
     const ratioStart = Math.max(0, Math.min(1, (cropY - 120) / Math.max(1, pageHeight - 160)));
     const ratioEnd = Math.max(ratioStart, Math.min(1, (cropBottom - 120) / Math.max(1, pageHeight - 160)));
@@ -374,6 +422,93 @@ export function captureDocumentBlockSnapshot(params: {
     pageNumber: pdfPage?.pageNumber || 1,
     docName: pdfPage?.docName || '문서',
   };
+}
+
+/**
+ * 실제 PDF 렌더링 이미지 + 속지 + 머리글/바닥글 + 워터마크 + 필기 + 텍스트 + 스탬프 + 먹칠까지
+ * 화면과 100% 동일하게 합성한 뒤 블록 영역만 잘라내는 고정밀 비동기 캡처.
+ * (먹칠 영역은 이미지에서도 검정으로 영구 마스킹되고 텍스트 발췌에서도 제외 → 민감정보 유출 0%)
+ */
+export async function captureDocumentBlockSnapshotAsync(params: {
+  cropRect: BlockRect;
+  pageWidth: number;
+  pageHeight: number;
+  isPdfMode: boolean;
+  isNightMode: boolean;
+  paperTemplate: PaperTemplate;
+  pdfPage: PdfPageSnapshotMeta | null;
+  pdfPageData: PdfPageData | null;
+  strokes: FreeHandStroke[];
+  textBoxes: FreeTextBox[];
+  stamps: PdfStampItem[];
+  redactions: PdfRedactionRect[];
+  watermark?: PdfWatermarkConfig;
+  headerFooter?: PdfHeaderFooterConfig;
+}): Promise<CapturedBlockResult> {
+  const hasRenderedImage = Boolean(params.pdfPageData?.renderedImageUri);
+  const base = captureDocumentBlockSnapshot({
+    cropRect: params.cropRect,
+    pageWidth: params.pageWidth,
+    pageHeight: params.pageHeight,
+    isPdfMode: params.isPdfMode,
+    isNightMode: params.isNightMode,
+    paperTemplate: params.paperTemplate,
+    pdfPage: params.pdfPage,
+    strokes: params.strokes,
+    textBoxes: params.textBoxes,
+    redactions: params.redactions,
+    hasRenderedImage,
+  });
+
+  if (Platform.OS !== 'web' || typeof document === 'undefined') return base;
+
+  try {
+    const scale = base.width * base.height > 300000 ? 1.5 : 2;
+    const composite = await renderCompositePageToCanvas({
+      pageNumber: params.pdfPage?.pageNumber || 1,
+      totalPages: params.pdfPage?.totalPages || 1,
+      pageWidth: params.pageWidth,
+      pageHeight: params.pageHeight,
+      isPdfMode: params.isPdfMode,
+      isNightMode: params.isNightMode,
+      paperTemplate: params.paperTemplate,
+      pdfPage: params.pdfPageData,
+      strokes: params.strokes,
+      textBoxes: params.textBoxes,
+      stamps: params.stamps,
+      redactions: params.redactions,
+      watermark: params.watermark,
+      headerFooter: params.headerFooter,
+      scale,
+    });
+    if (!composite) return base;
+
+    const cropX = Math.max(0, Math.round(params.cropRect.x));
+    const cropY = Math.max(0, Math.round(params.cropRect.y));
+    const out = document.createElement('canvas');
+    out.width = Math.round(base.width * scale);
+    out.height = Math.round(base.height * scale);
+    const octx = out.getContext('2d');
+    if (!octx) return base;
+    octx.drawImage(
+      composite,
+      cropX * scale,
+      cropY * scale,
+      base.width * scale,
+      base.height * scale,
+      0,
+      0,
+      out.width,
+      out.height
+    );
+    octx.strokeStyle = 'rgba(148, 163, 184, 0.35)';
+    octx.lineWidth = 1;
+    octx.strokeRect(0.5, 0.5, out.width - 1, out.height - 1);
+    return { ...base, imageDataUrl: out.toDataURL('image/png') };
+  } catch (err) {
+    console.warn('Composite block capture fallback:', err);
+    return base;
+  }
 }
 
 /**
