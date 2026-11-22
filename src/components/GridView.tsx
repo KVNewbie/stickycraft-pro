@@ -139,6 +139,7 @@ export const GridView: React.FC = () => {
   const setSelectedColor = useNoteStore((s) => s.setSelectedColor);
   const setSearchQuery = useNoteStore((s) => s.setSearchQuery);
   const setSortBy = useNoteStore((s) => s.setSortBy);
+  const isSearchOpen = useNoteStore((s) => s.isSearchOpen);
 
   const isListMode = filters.listLayout === 'list';
 
@@ -347,52 +348,54 @@ export const GridView: React.FC = () => {
           </View>
         </View>
 
-        {/* 1-Tap Quick Color Bar (ColorNote Benchmark) */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.quickColorScroll}
-        >
-          <TouchableOpacity
-            style={[
-              styles.quickColorAllBtn,
-              !filters.selectedColor && styles.quickColorAllBtnActive,
-            ]}
-            onPress={() => setSelectedColor(null)}
+        {/* 1-Tap Quick Color Bar (SearchBar가 닫혀 있을 때만 표시하여 중복 제거) */}
+        {!isSearchOpen && (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.quickColorScroll}
           >
-            <Text
+            <TouchableOpacity
               style={[
-                styles.quickColorAllText,
-                !filters.selectedColor && styles.quickColorAllTextActive,
+                styles.quickColorAllBtn,
+                !filters.selectedColor && styles.quickColorAllBtnActive,
               ]}
+              onPress={() => setSelectedColor(null)}
             >
-              전체
-            </Text>
-          </TouchableOpacity>
-          {COLOR_KEYS.map((cKey) => {
-            const isSelected = filters.selectedColor === cKey;
-            const c = NOTE_COLORS[cKey];
-            return (
-              <TouchableOpacity
-                key={cKey}
-                onPress={() => setSelectedColor(isSelected ? null : cKey)}
+              <Text
                 style={[
-                  styles.quickColorDot,
-                  { backgroundColor: c.bg, borderColor: c.cardBorder },
-                  isSelected && styles.quickColorDotSelected,
+                  styles.quickColorAllText,
+                  !filters.selectedColor && styles.quickColorAllTextActive,
                 ]}
-                hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
               >
-                {isSelected && (
-                  <View style={[styles.quickColorDotInner, { backgroundColor: c.text }]} />
-                )}
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
+                전체
+              </Text>
+            </TouchableOpacity>
+            {COLOR_KEYS.map((cKey) => {
+              const isSelected = filters.selectedColor === cKey;
+              const c = NOTE_COLORS[cKey];
+              return (
+                <TouchableOpacity
+                  key={cKey}
+                  onPress={() => setSelectedColor(isSelected ? null : cKey)}
+                  style={[
+                    styles.quickColorDot,
+                    { backgroundColor: c.bg, borderColor: c.cardBorder },
+                    isSelected && styles.quickColorDotSelected,
+                  ]}
+                  hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+                >
+                  {isSelected && (
+                    <View style={[styles.quickColorDotInner, { backgroundColor: c.text }]} />
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        )}
 
-        {/* 검색어가 활성화된 경우 표시되는 퀵 배너 및 원클릭 초기화 */}
-        {filters.searchQuery.trim() ? (
+        {/* 검색창이 닫혀 있을 때만 활성 검색어 배너 표시 */}
+        {!isSearchOpen && filters.searchQuery.trim() ? (
           <View style={styles.searchBannerRow}>
             <View style={styles.searchBadge}>
               <Text style={styles.searchBadgeText}>

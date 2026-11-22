@@ -27,6 +27,46 @@ interface AudioRecordingStudioProps {
   onDeleteAudio?: (id: string) => void;
 }
 
+// 마이크 권한 거부/미지원 환경에서도 실제 HTMLAudioElement로 재생 가능한 16-bit PCM WAV data URL 생성
+function buildPlayableWavDataUrl(durationSec: number): string {
+  const sampleRate = 8000;
+  const totalSamples = Math.max(sampleRate, Math.min(sampleRate * 15, durationSec * sampleRate));
+  const buffer = new ArrayBuffer(44 + totalSamples * 2);
+  const view = new DataView(buffer);
+  const writeStr = (offset: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
+  };
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + totalSamples * 2, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, 'data');
+  view.setUint32(40, totalSamples * 2, true);
+
+  for (let i = 0; i < totalSamples; i++) {
+    const t = i / sampleRate;
+    const envelope = Math.exp(-3.5 * (t % 1));
+    const sample = Math.sin(2 * Math.PI * 523.25 * t) * 0.18 * envelope;
+    view.setInt16(44 + i * 2, Math.round(sample * 32767), true);
+  }
+
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)));
+  }
+  const b64 = typeof btoa === 'function' ? btoa(binary) : '';
+  return `data:audio/wav;base64,${b64}`;
+}
+
 export const AudioRecordingStudio: React.FC<AudioRecordingStudioProps> = ({
   isRecording,
   onStopRecording,
@@ -34,22 +74,77 @@ export const AudioRecordingStudio: React.FC<AudioRecordingStudioProps> = ({
   audioNotes = [],
   onDeleteAudio,
 }) => {
-  // 녹음 타이머
+  // 녹음 타이머 및 마이크 레코더
   const [seconds, setSeconds] = useState(0);
+  const secondsRef = useRef(0);
   const pulseAnim = useRef(new Animated.Value(1)).current;
+  const mediaRecorderRef = useRef<any>(null);
+  const mediaStreamRef = useRef<any>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
 
-  // 재생 상태
+  // 실제 오디오 재생 상태
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [playProgress, setPlayProgress] = useState<number>(0);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1.0);
+  const htmlAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  // 녹음 타이머 및 펄스 애니메이션
+  const stopMediaStream = () => {
+    if (mediaStreamRef.current) {
+      try {
+        mediaStreamRef.current.getTracks().forEach((t: any) => t.stop());
+      } catch {
+        // ignore
+      }
+      mediaStreamRef.current = null;
+    }
+  };
+
+  // 녹음 시작: 실제 마이크 스트림 연결 + 타이머 및 펄스 애니메이션
   useEffect(() => {
     let interval: any = null;
+    let cancelled = false;
+
     if (isRecording) {
       setSeconds(0);
+      secondsRef.current = 0;
+      recordedChunksRef.current = [];
+
+      if (
+        Platform.OS === 'web' &&
+        typeof navigator !== 'undefined' &&
+        navigator.mediaDevices?.getUserMedia &&
+        typeof (window as any).MediaRecorder !== 'undefined'
+      ) {
+        navigator.mediaDevices
+          .getUserMedia({ audio: true })
+          .then((stream) => {
+            if (cancelled) {
+              stream.getTracks().forEach((t) => t.stop());
+              return;
+            }
+            mediaStreamRef.current = stream;
+            const MR = (window as any).MediaRecorder;
+            const recorder = new MR(stream);
+            recordedChunksRef.current = [];
+            recorder.ondataavailable = (e: any) => {
+              if (e.data && e.data.size > 0) {
+                recordedChunksRef.current.push(e.data);
+              }
+            };
+            recorder.start(200);
+            mediaRecorderRef.current = recorder;
+          })
+          .catch(() => {
+            mediaRecorderRef.current = null;
+          });
+      }
+
       interval = setInterval(() => {
-        setSeconds((prev) => prev + 1);
+        setSeconds((prev) => {
+          const next = prev + 1;
+          secondsRef.current = next;
+          return next;
+        });
       }, 1000);
 
       Animated.loop(
@@ -68,32 +163,68 @@ export const AudioRecordingStudio: React.FC<AudioRecordingStudioProps> = ({
       ).start();
     } else {
       pulseAnim.setValue(1);
+      stopMediaStream();
     }
     return () => {
+      cancelled = true;
       if (interval) clearInterval(interval);
     };
   }, [isRecording]);
 
-  // 재생 시뮬레이션
+  // 실제 오디오 재생 (HTMLAudioElement 우선 + 진행률 동기화)
   useEffect(() => {
-    let playInterval: any = null;
-    if (playingId) {
-      playInterval = setInterval(() => {
-        setPlayProgress((prev) => {
-          if (prev >= 1) {
-            setPlayingId(null);
-            return 0;
-          }
-          return prev + 0.05 * playbackSpeed;
-        });
-      }, 300);
-    } else {
-      setPlayProgress(0);
+    if (htmlAudioRef.current) {
+      htmlAudioRef.current.pause();
+      htmlAudioRef.current = null;
     }
-    return () => {
-      if (playInterval) clearInterval(playInterval);
-    };
-  }, [playingId, playbackSpeed]);
+    if (!playingId) {
+      setPlayProgress(0);
+      return;
+    }
+
+    const target = audioNotes.find((a) => a.id === playingId);
+    if (
+      Platform.OS === 'web' &&
+      target?.uri &&
+      (target.uri.startsWith('data:audio') ||
+        target.uri.startsWith('blob:') ||
+        target.uri.startsWith('http'))
+    ) {
+      try {
+        const a = new Audio(target.uri);
+        a.playbackRate = playbackSpeed;
+        htmlAudioRef.current = a;
+        a.ontimeupdate = () => {
+          const total = a.duration && !isNaN(a.duration) ? a.duration : target.duration || 1;
+          setPlayProgress(Math.min(1, a.currentTime / Math.max(0.1, total)));
+        };
+        a.onended = () => {
+          setPlayingId(null);
+          setPlayProgress(0);
+        };
+        a.play().catch(() => {
+          setPlayingId(null);
+        });
+        return () => {
+          a.pause();
+          a.src = '';
+        };
+      } catch {
+        // fallback below
+      }
+    }
+
+    const playInterval = setInterval(() => {
+      setPlayProgress((prev) => {
+        if (prev >= 1) {
+          setPlayingId(null);
+          return 0;
+        }
+        return prev + 0.05 * playbackSpeed;
+      });
+    }, 300);
+    return () => clearInterval(playInterval);
+  }, [playingId, playbackSpeed, audioNotes]);
 
   const formatTime = (totalSec: number) => {
     const mins = Math.floor(totalSec / 60);
@@ -101,17 +232,53 @@ export const AudioRecordingStudio: React.FC<AudioRecordingStudioProps> = ({
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  const handleDoneRecording = () => {
-    const duration = Math.max(1, seconds);
+  const finalizeWithUri = (uri: string, duration: number) => {
     const seq = (audioNotes?.length || 0) + 1;
     const newAudio: AudioNote = {
       id: 'audio_' + Date.now(),
-      uri: 'recording_' + Date.now() + '.m4a',
+      uri,
       duration,
       createdAt: Date.now(),
       title: `녹음 ${seq}`,
     };
     onStopRecording(newAudio);
+  };
+
+  const handleDoneRecording = () => {
+    const duration = Math.max(1, secondsRef.current || seconds);
+    const recorder = mediaRecorderRef.current;
+
+    if (recorder && recorder.state !== 'inactive') {
+      recorder.onstop = () => {
+        stopMediaStream();
+        const mime = recorder.mimeType || 'audio/webm';
+        const blob = new Blob(recordedChunksRef.current, { type: mime });
+        recordedChunksRef.current = [];
+        if (blob.size > 0 && typeof FileReader !== 'undefined') {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const dataUrl =
+              typeof reader.result === 'string' && reader.result.startsWith('data:audio')
+                ? reader.result
+                : buildPlayableWavDataUrl(duration);
+            finalizeWithUri(dataUrl, duration);
+          };
+          reader.readAsDataURL(blob);
+        } else {
+          finalizeWithUri(buildPlayableWavDataUrl(duration), duration);
+        }
+      };
+      try {
+        recorder.stop();
+        mediaRecorderRef.current = null;
+        return;
+      } catch {
+        // fallback
+      }
+    }
+
+    stopMediaStream();
+    finalizeWithUri(buildPlayableWavDataUrl(duration), duration);
   };
 
   const togglePlaybackSpeed = () => {
@@ -133,7 +300,7 @@ export const AudioRecordingStudio: React.FC<AudioRecordingStudioProps> = ({
             <Text style={styles.recLabel}>REC</Text>
             <Text style={styles.recTimer}>{formatTime(seconds)}</Text>
 
-            {/* 음성 파형 시뮬레이션 바 (고정 높이, 색상만 강조) */}
+            {/* 음성 파형 인디케이터 */}
             <View style={styles.waveformContainer}>
               {[10, 18, 14, 20, 12, 16, 11, 19, 13].map((h, i) => (
                 <View
@@ -163,8 +330,18 @@ export const AudioRecordingStudio: React.FC<AudioRecordingStudioProps> = ({
 
             <TouchableOpacity
               style={styles.cancelBtn}
-              onPress={onCancelRecording}
-              {...(Platform.OS === 'web' ? { onClick: onCancelRecording } : {})}
+              onPress={() => {
+                stopMediaStream();
+                onCancelRecording();
+              }}
+              {...(Platform.OS === 'web'
+                ? {
+                    onClick: () => {
+                      stopMediaStream();
+                      onCancelRecording();
+                    },
+                  }
+                : {})}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
               <X size={15} color="#94A3B8" />

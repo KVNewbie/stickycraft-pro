@@ -3901,6 +3901,13 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           </View>
         </View>
 
+        {/* 중앙 페이지 점퍼 + 우측 액션 컨트롤 (좁은 화면/모바일에서 제목과 겹치지 않고 부드럽게 가로 스크롤) */}
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={{ flexGrow: 0, maxWidth: '100%' }}
+          contentContainerStyle={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}
+        >
         {/* 중앙: 페이지 점퍼 & 전환 버튼 (< 1 / 3 > + 🔖 북마크) */}
         <View style={styles.pageJumperPill}>
           <TouchableOpacity
@@ -4173,11 +4180,24 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
             <Text style={styles.saveExitText}>저장</Text>
           </TouchableOpacity>
         </View>
+        </ScrollView>
       </View>
 
       {/* Adobe Acrobat 스타일 PDF 4대 모드 전환 바 (편집/주석 | 페이지 구성 | 병합(Merge) | 분할(Split)) */}
       {isPdfMode && !isFullscreen && (
         <View style={styles.acrobatModeBar}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={{ width: '100%' }}
+            contentContainerStyle={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 12,
+              minWidth: '100%',
+            }}
+          >
           <View style={styles.acrobatTabGroup}>
             <TouchableOpacity
               style={[
@@ -4412,6 +4432,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
               <Text style={styles.acrobatOpenHubText}>PDF 허브</Text>
             </TouchableOpacity>
           </View>
+          </ScrollView>
         </View>
       )}
 
@@ -6280,8 +6301,13 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           </View>
         )}
 
-        {/* 메인 툴박스 알약 바 */}
+        {/* 메인 툴박스 알약 바 (모바일/태블릿에서도 잘림 없이 가로 스크롤 지원) */}
         <View style={styles.floatingToolboxPill}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}
+          >
           {/* 1. 손바닥 탐색 (Flexcil / Goodnotes 제스처/뷰어 모드) */}
           <TouchableOpacity
             style={[styles.toolBtn, activeTool === 'hand' && styles.toolBtnActiveGreen]}
@@ -6578,6 +6604,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
               </TouchableOpacity>
             ))}
           </View>
+          </ScrollView>
         </View>
 
         {/* 색상 팔레트 팝오버 */}
@@ -7141,12 +7168,15 @@ const styles = StyleSheet.create({
     backgroundColor: '#0F172A',
   },
   topNavigationBar: {
-    height: 56,
+    minHeight: 56,
     backgroundColor: '#FFFFFF',
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    gap: 8,
     borderBottomWidth: 1,
     borderBottomColor: '#E2E8F0',
     zIndex: 10,
@@ -7154,8 +7184,10 @@ const styles = StyleSheet.create({
   navLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
-    flex: 1,
+    gap: 10,
+    minWidth: 210,
+    flexShrink: 1,
+    flexGrow: 1,
   },
   backBtn: {
     padding: 6,
@@ -7217,7 +7249,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 6,
     justifyContent: 'flex-end',
-    flex: 1,
   },
   actionBtn: {
     padding: 8,
@@ -7563,7 +7594,10 @@ const styles = StyleSheet.create({
   },
   subShapeToolbox: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
     alignItems: 'center',
+    maxWidth: '95%',
     backgroundColor: '#FFFFFF',
     borderRadius: 20,
     paddingHorizontal: 12,
@@ -7641,6 +7675,7 @@ const styles = StyleSheet.create({
   toolGuideBadgeRed: {
     flexDirection: 'row',
     alignItems: 'center',
+    maxWidth: '94%',
     gap: 6,
     backgroundColor: '#FEF2F2',
     paddingHorizontal: 12,
@@ -7663,6 +7698,7 @@ const styles = StyleSheet.create({
   toolGuideBadgeBlue: {
     flexDirection: 'row',
     alignItems: 'center',
+    maxWidth: '94%',
     gap: 6,
     backgroundColor: '#EFF6FF',
     paddingHorizontal: 12,
@@ -7685,9 +7721,11 @@ const styles = StyleSheet.create({
   floatingToolboxPill: {
     flexDirection: 'row',
     alignItems: 'center',
+    maxWidth: '95%',
+    overflow: 'hidden',
     backgroundColor: '#FFFFFF',
     borderRadius: 30,
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
     paddingVertical: 8,
     gap: 10,
     ...Platform.select({

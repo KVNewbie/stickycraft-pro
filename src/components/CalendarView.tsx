@@ -661,8 +661,9 @@ const styles = StyleSheet.create({
   },
   dayCell: {
     width: `${100 / 7}%`,
-    height: 62,
-    padding: 3,
+    minHeight: 74,
+    paddingVertical: 5,
+    paddingHorizontal: 3,
     alignItems: 'center',
     borderRadius: 8,
     borderWidth: 1,
@@ -682,7 +683,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     color: '#1E293B',
-    marginBottom: 3,
+    marginBottom: 1,
   },
   dayNumberOutside: {
     color: '#94A3B8',
@@ -708,10 +709,11 @@ const styles = StyleSheet.create({
   },
   cellLunarText: {
     fontSize: 9,
+    lineHeight: 12,
     color: '#64748B',
     fontWeight: '500',
-    marginTop: -2,
-    marginBottom: 2,
+    marginTop: 1,
+    marginBottom: 4,
   },
   cellLunarHoliday: {
     color: '#DC2626',

@@ -226,11 +226,61 @@ export const StickyCard: React.FC<StickyCardProps> = React.memo(({
   } = useNoteStore.getState();
 
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+  const [isActionMenuOpen, setIsActionMenuOpen] = useState(false);
+  const allNotes = useNoteStore((s) => s.notes);
+
   const primarySourceLink =
     note.pdfSourceLink ||
     (note.pdfSourceLinks && note.pdfSourceLinks.length > 0
       ? note.pdfSourceLinks[note.pdfSourceLinks.length - 1]
       : undefined);
+
+  // 발췌 스티커의 원문 문서명과 현재 쪽수를 고유 ID 기준으로 실시간 조회 (문서 이름 변경·페이지 이동 즉시 반영)
+  const resolvedSourceInfo = React.useMemo(() => {
+    if (!primarySourceLink) return null;
+    const targetDoc =
+      allNotes.find((n) => !n.isDeleted && n.id === primarySourceLink.sourceNoteId) ||
+      (primarySourceLink.sourceDocUid
+        ? allNotes.find((n) => !n.isDeleted && n.pdfDocUid === primarySourceLink.sourceDocUid)
+        : undefined) ||
+      allNotes.find(
+        (n) =>
+          !n.isDeleted &&
+          (n.title === primarySourceLink.sourceDocName ||
+            n.pdfName === primarySourceLink.sourceDocName)
+      );
+    let pageNum = primarySourceLink.fallbackPageNumber || 1;
+    if (targetDoc?.pdfPages && primarySourceLink.sourcePageId) {
+      const idx = targetDoc.pdfPages.findIndex((p) => p.id === primarySourceLink.sourcePageId);
+      if (idx >= 0) pageNum = idx + 1;
+    }
+    const rawDocName =
+      targetDoc?.title || targetDoc?.pdfName || primarySourceLink.sourceDocName || 'PDF 원문';
+    const docTitle = rawDocName.replace(/\.pdf$/i, '');
+    return { docTitle, pageNum };
+  }, [allNotes, primarySourceLink]);
+
+  // 원문 보기 배지가 있을 때는 본문 하단의 정적 [출처: ... · P.N] 중복 줄을 제거하여 최신 쪽수와 충돌하지 않게 표시
+  const displayContent = React.useMemo(() => {
+    if (!note.content) return '';
+    if (!primarySourceLink) return note.content;
+    return note.content.replace(/\n*\s*\[출처:[^\]]+\]\s*$/g, '').trim();
+  }, [note.content, primarySourceLink]);
+
+  // 실제 오디오 스트림(data:audio, blob:, file:, http)이 존재하는 음성 메모만 표시 (가짜 시뮬레이션 항목 제외)
+  const validAudioNotes = React.useMemo(
+    () =>
+      (note.audioNotes || []).filter((a) =>
+        Boolean(
+          a.uri &&
+            (a.uri.startsWith('data:audio') ||
+              a.uri.startsWith('blob:') ||
+              a.uri.startsWith('file:') ||
+              a.uri.startsWith('http'))
+        )
+      ),
+    [note.audioNotes]
+  );
 
   const colorConfig = NOTE_COLORS[note.color] || NOTE_COLORS.yellow;
   const rotationDeg = isCanvasItem ? `${note.rotation || 0}deg` : '0deg';
@@ -335,58 +385,135 @@ export const StickyCard: React.FC<StickyCardProps> = React.memo(({
         {/* Noteshelf 페이퍼 속지 템플릿 패턴 (줄간격 동기화) */}
         <PaperTemplatePattern template={note.paperTemplate} lineSpacing={dynamicLineHeight} />
 
-        {/* Card Header (ColorNote Pro Actions) */}
+        {/* Card Header (슬림 헤더: 좌측 핀·상태 아이콘 + 우측 날짜·더보기 메뉴로 모바일 날짜 잘림 완벽 방지) */}
         <View style={styles.header}>
-          <TouchableOpacity
-            style={styles.pinButton}
-            onPress={(e) => {
-              e.stopPropagation();
-              togglePin(note.id);
-            }}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          >
-            <Pin
-              size={15}
-              color={note.isPinned ? '#E11D48' : colorConfig.textMuted}
-              fill={note.isPinned ? '#E11D48' : 'none'}
-            />
-          </TouchableOpacity>
-
-          <View style={styles.headerRight}>
-            {/* ColorNote 위젯 스튜디오 */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
             <TouchableOpacity
+              style={styles.pinButton}
               onPress={(e) => {
                 e.stopPropagation();
-                openWidgetModal(note);
+                togglePin(note.id);
               }}
-              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-              style={styles.headerActionBtn}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
-              <Ionicons name="apps-outline" size={14} color={colorConfig.textMuted} />
-            </TouchableOpacity>
-
-            {/* ColorNote 리마인더/알람 */}
-            <TouchableOpacity
-              onPress={(e) => {
-                e.stopPropagation();
-                openReminderModal(note);
-              }}
-              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-              style={styles.headerActionBtn}
-            >
-              <Ionicons
-                name={note.reminder ? 'alarm' : 'alarm-outline'}
-                size={14}
-                color={note.reminder ? '#DC2626' : colorConfig.textMuted}
+              <Pin
+                size={15}
+                color={note.isPinned ? '#E11D48' : colorConfig.textMuted}
+                fill={note.isPinned ? '#E11D48' : 'none'}
               />
             </TouchableOpacity>
 
-            {/* ColorNote 메모 잠금 */}
+            {note.reminder && (
+              <TouchableOpacity
+                onPress={(e) => {
+                  e.stopPropagation();
+                  openReminderModal(note);
+                }}
+                hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+              >
+                <Ionicons name="alarm" size={14} color="#DC2626" />
+              </TouchableOpacity>
+            )}
+
+            {note.isLocked && (
+              <TouchableOpacity
+                onPress={(e) => {
+                  e.stopPropagation();
+                  openLockModal(note, () => {
+                    toggleNoteLock(note.id);
+                  });
+                }}
+                hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+              >
+                <Ionicons name="lock-closed" size={13} color="#EF4444" />
+              </TouchableOpacity>
+            )}
+          </View>
+
+          <View style={styles.headerRight}>
+            <Text style={[styles.dateText, { color: colorConfig.textMuted }]} numberOfLines={1}>
+              {formattedDate}
+            </Text>
+
+            <TouchableOpacity
+              accessibilityRole="button"
+              accessibilityLabel="메모 메뉴 더보기"
+              onPress={(e) => {
+                e.stopPropagation();
+                setIsActionMenuOpen((prev) => !prev);
+              }}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              style={[
+                styles.headerActionBtn,
+                {
+                  paddingHorizontal: 5,
+                  paddingVertical: 2,
+                  borderRadius: 6,
+                  backgroundColor: isActionMenuOpen ? 'rgba(15, 23, 42, 0.08)' : 'transparent',
+                },
+              ]}
+            >
+              <Ionicons
+                name={isActionMenuOpen ? 'close' : 'ellipsis-horizontal'}
+                size={15}
+                color={colorConfig.text}
+              />
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* 더보기(⋯) 클릭 시 펼쳐지는 빠른 액션 바 (모바일/데스크톱 넓은 터치 영역) */}
+        {isActionMenuOpen && (
+          <View
+            style={{
+              flexDirection: 'row',
+              flexWrap: 'wrap',
+              alignItems: 'center',
+              gap: 6,
+              paddingVertical: 6,
+              paddingHorizontal: 8,
+              marginBottom: 8,
+              borderRadius: 10,
+              backgroundColor: 'rgba(255, 255, 255, 0.86)',
+              borderWidth: 1,
+              borderColor: 'rgba(15, 23, 42, 0.08)',
+            }}
+          >
             <TouchableOpacity
               onPress={(e) => {
                 e.stopPropagation();
+                setIsActionMenuOpen(false);
+                openWidgetModal(note);
+              }}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 6, paddingVertical: 3 }}
+            >
+              <Ionicons name="apps-outline" size={13} color="#334155" />
+              <Text style={{ fontSize: 11, fontWeight: '700', color: '#334155' }}>위젯</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={(e) => {
+                e.stopPropagation();
+                setIsActionMenuOpen(false);
+                openReminderModal(note);
+              }}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 6, paddingVertical: 3 }}
+            >
+              <Ionicons
+                name={note.reminder ? 'alarm' : 'alarm-outline'}
+                size={13}
+                color={note.reminder ? '#DC2626' : '#334155'}
+              />
+              <Text style={{ fontSize: 11, fontWeight: '700', color: note.reminder ? '#DC2626' : '#334155' }}>
+                알람
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={(e) => {
+                e.stopPropagation();
+                setIsActionMenuOpen(false);
                 if (note.isLocked) {
-                  // 잠금 해제 시 PIN 확인
                   openLockModal(note, () => {
                     toggleNoteLock(note.id);
                   });
@@ -394,69 +521,67 @@ export const StickyCard: React.FC<StickyCardProps> = React.memo(({
                   toggleNoteLock(note.id);
                 }
               }}
-              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-              style={styles.headerActionBtn}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 6, paddingVertical: 3 }}
             >
               <Ionicons
                 name={note.isLocked ? 'lock-closed' : 'lock-open-outline'}
-                size={14}
-                color={note.isLocked ? '#EF4444' : colorConfig.textMuted}
+                size={13}
+                color={note.isLocked ? '#EF4444' : '#334155'}
               />
+              <Text style={{ fontSize: 11, fontWeight: '700', color: note.isLocked ? '#EF4444' : '#334155' }}>
+                {note.isLocked ? '잠금해제' : '잠금'}
+              </Text>
             </TouchableOpacity>
 
-            {/* 사본 생성 */}
             <TouchableOpacity
               onPress={(e) => {
                 e.stopPropagation();
+                setIsActionMenuOpen(false);
                 duplicateNote(note.id);
               }}
-              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-              style={styles.headerActionBtn}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 6, paddingVertical: 3 }}
             >
-              <Copy size={12} color={colorConfig.textMuted} />
+              <Copy size={12} color="#334155" />
+              <Text style={{ fontSize: 11, fontWeight: '700', color: '#334155' }}>복제</Text>
             </TouchableOpacity>
 
-            {/* Apple Notes & 3M Post-it 액자 카드 공유 */}
             <TouchableOpacity
               onPress={(e) => {
                 e.stopPropagation();
+                setIsActionMenuOpen(false);
                 setIsShareModalOpen(true);
               }}
-              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-              style={styles.headerActionBtn}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 6, paddingVertical: 3 }}
             >
-              <Ionicons name="share-outline" size={13} color={colorConfig.textMuted} />
+              <Ionicons name="share-outline" size={13} color="#334155" />
+              <Text style={{ fontSize: 11, fontWeight: '700', color: '#334155' }}>공유</Text>
             </TouchableOpacity>
 
-            {/* ColorNote 보관함 이동 (Archive) */}
             <TouchableOpacity
               onPress={(e) => {
                 e.stopPropagation();
+                setIsActionMenuOpen(false);
                 toggleArchiveNote(note.id);
               }}
-              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-              style={styles.headerActionBtn}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 6, paddingVertical: 3 }}
             >
-              <Ionicons name="archive-outline" size={13} color={colorConfig.textMuted} />
+              <Ionicons name="archive-outline" size={13} color="#334155" />
+              <Text style={{ fontSize: 11, fontWeight: '700', color: '#334155' }}>보관</Text>
             </TouchableOpacity>
 
-            {/* ColorNote 휴지통으로 이동 (안전 삭제) */}
             <TouchableOpacity
               onPress={(e) => {
                 e.stopPropagation();
+                setIsActionMenuOpen(false);
                 deleteNote(note.id);
               }}
-              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-              style={styles.headerActionBtn}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 6, paddingVertical: 3 }}
             >
-              <Ionicons name="trash-outline" size={13} color={colorConfig.textMuted} />
+              <Ionicons name="trash-outline" size={13} color="#DC2626" />
+              <Text style={{ fontSize: 11, fontWeight: '700', color: '#DC2626' }}>삭제</Text>
             </TouchableOpacity>
-
-            <Text style={[styles.dateText, { color: colorConfig.textMuted }]}>
-              {formattedDate}
-            </Text>
           </View>
-        </View>
+        )}
 
         {/* Title */}
         {note.isLocked ? (
@@ -481,7 +606,7 @@ export const StickyCard: React.FC<StickyCardProps> = React.memo(({
           </TouchableOpacity>
         ) : null}
 
-        {/* PDF 발췌 스티커: 원문 보기 참조 링크 버튼 */}
+        {/* PDF 발췌 스티커: 실시간 원문 문서명 · 현재 쪽수가 반영되는 원문 보기 참조 링크 버튼 */}
         {!note.isLocked && primarySourceLink && (
           <TouchableOpacity
             style={{
@@ -496,6 +621,7 @@ export const StickyCard: React.FC<StickyCardProps> = React.memo(({
               paddingVertical: 4,
               borderRadius: 8,
               marginBottom: 6,
+              maxWidth: '100%',
             }}
             onPress={(e) => {
               e.stopPropagation();
@@ -511,8 +637,10 @@ export const StickyCard: React.FC<StickyCardProps> = React.memo(({
               : {})}
           >
             <Ionicons name="book-outline" size={12} color="#1D4ED8" />
-            <Text style={{ fontSize: 11, fontWeight: '800', color: '#1D4ED8' }}>
-              원문 보기 (발췌 위치 이동 →)
+            <Text style={{ fontSize: 11, fontWeight: '800', color: '#1D4ED8', flexShrink: 1 }} numberOfLines={1}>
+              {resolvedSourceInfo
+                ? `원문 보기 · ${resolvedSourceInfo.docTitle} (P.${resolvedSourceInfo.pageNum}쪽) →`
+                : '원문 보기 (발췌 위치 이동 →)'}
             </Text>
           </TouchableOpacity>
         )}
@@ -933,7 +1061,7 @@ export const StickyCard: React.FC<StickyCardProps> = React.memo(({
                   // Case 5: 기본 분리 / 자리차지 (텍스트 일반 표시 + 아래 인라인 이미지)
                   return (
                     <>
-                      {note.content ? (
+                      {displayContent ? (
                         <TouchableOpacity
                           activeOpacity={0.9}
                           onPress={handleCardPress}
@@ -949,7 +1077,7 @@ export const StickyCard: React.FC<StickyCardProps> = React.memo(({
                               },
                             ]}
                           >
-                            {note.content}
+                            {displayContent}
                           </Text>
                         </TouchableOpacity>
                       ) : null}
@@ -1135,15 +1263,15 @@ export const StickyCard: React.FC<StickyCardProps> = React.memo(({
               );
             })()}
 
-            {/* Noteshelf & Jnotes 음성 녹음 메모 */}
-            {note.audioNotes && note.audioNotes.length > 0 && (
+            {/* Noteshelf & Jnotes 음성 녹음 메모 (실제 재생 가능한 오디오 스트림이 있는 녹음만 노출) */}
+            {validAudioNotes.length > 0 && (
               <View style={{ marginTop: 8, gap: 4 }}>
-                {note.audioNotes.map((audio, idx) => (
+                {validAudioNotes.map((audio, idx) => (
                   <AudioPlayerBar
                     key={audio.id}
                     audio={audio}
                     index={idx}
-                    totalCount={note.audioNotes!.length}
+                    totalCount={validAudioNotes.length}
                     isPdfNote={isPdfNote}
                     accentColor={colorConfig.text}
                     onUpdateTitle={(newTitle) => {
