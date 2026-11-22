@@ -201,7 +201,7 @@ const RenderCardImage: React.FC<{
   return <Image source={{ uri }} style={style} resizeMode={resizeMode} />;
 };
 
-export const StickyCard: React.FC<StickyCardProps> = ({
+export const StickyCard: React.FC<StickyCardProps> = React.memo(({
   note,
   isCanvasItem = false,
   onPress,
@@ -222,7 +222,7 @@ export const StickyCard: React.FC<StickyCardProps> = ({
     toggleArchiveNote,
     openReminderModal,
     deleteNote,
-  } = useNoteStore();
+  } = useNoteStore.getState();
 
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
 
@@ -916,20 +916,55 @@ export const StickyCard: React.FC<StickyCardProps> = ({
                                   },
                                 ]}
                               >
-                                <RenderCardImage
-                                  uri={img.uri}
-                                  style={[
-                                    styles.inlineImage,
-                                    hasCustom
-                                      ? { width: img.customWidth || 180, height: img.customHeight || 140 }
-                                      : img.size === 'small'
-                                      ? { height: 90, width: 120 }
-                                      : img.size === 'large'
-                                      ? { height: 200, width: '100%' }
-                                      : { height: 140, width: '100%' },
-                                  ]}
-                                  resizeMode="cover"
-                                />
+                                {(() => {
+                                  const isPdfExcerptImg =
+                                    !!img.caption?.includes('발췌') ||
+                                    !!img.id?.startsWith('pdfsnip_') ||
+                                    !!img.id?.startsWith('img_sidesnip_');
+                                  return (
+                                    <>
+                                      <RenderCardImage
+                                        uri={img.uri}
+                                        style={[
+                                          styles.inlineImage,
+                                          hasCustom
+                                            ? { width: img.customWidth || 180, height: img.customHeight || 140 }
+                                            : isPdfExcerptImg
+                                            ? {
+                                                height: 150,
+                                                width: '100%',
+                                                backgroundColor: '#FFFFFF',
+                                                borderWidth: 1,
+                                                borderColor: '#E2E8F0',
+                                              }
+                                            : img.size === 'small'
+                                            ? { height: 90, width: 120 }
+                                            : img.size === 'large'
+                                            ? { height: 200, width: '100%' }
+                                            : { height: 140, width: '100%' },
+                                        ]}
+                                        resizeMode={isPdfExcerptImg ? 'contain' : 'cover'}
+                                      />
+                                      {isPdfExcerptImg && img.caption ? (
+                                        <View
+                                          style={{
+                                            position: 'absolute',
+                                            left: 6,
+                                            bottom: 6,
+                                            backgroundColor: 'rgba(15, 23, 42, 0.78)',
+                                            paddingHorizontal: 6,
+                                            paddingVertical: 2,
+                                            borderRadius: 5,
+                                          }}
+                                        >
+                                          <Text style={{ fontSize: 9.5, fontWeight: '700', color: '#FFFFFF' }} numberOfLines={1}>
+                                            📄 {img.caption}
+                                          </Text>
+                                        </View>
+                                      ) : null}
+                                    </>
+                                  );
+                                })()}
                                 <View style={styles.zoomBadge}>
                                   <ImageIcon size={10} color="#FFFFFF" />
                                 </View>
@@ -1118,7 +1153,7 @@ export const StickyCard: React.FC<StickyCardProps> = ({
       />
     </View>
   );
-};
+});
 
 const styles = StyleSheet.create({
   wrapper: {

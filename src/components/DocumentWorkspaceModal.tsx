@@ -67,8 +67,12 @@ import {
   Scissors,
   LayoutGrid,
   Edit3,
+  Crop,
+  PanelRight,
+  FilePlus2,
+  ClipboardCopy,
 } from 'lucide-react-native';
-import { Note, FreeHandStroke, AudioNote, PaperTemplate, FreeTextBox, PdfPageData } from '../types/note';
+import { Note, NoteImage, FreeHandStroke, AudioNote, PaperTemplate, FreeTextBox, PdfPageData } from '../types/note';
 import { useNoteStore } from '../store/useNoteStore';
 import { AudioRecordingStudio } from './AudioRecordingStudio';
 import { PaperTemplatePattern } from './PaperTemplatePattern';
@@ -88,6 +92,13 @@ import {
   parseUploadedPdfFile,
   extractPdfPagesFromNote,
 } from './PdfAcrobatStudioPanel';
+import {
+  captureDocumentBlockSnapshot,
+  copyBlockToClipboard,
+  BlockRect,
+  CapturedBlockResult,
+} from '../utils/pdfBlockCapture';
+import { PdfSideNoteDrawer, SideNoteSnippetItem } from './PdfSideNoteDrawer';
 
 interface DocumentWorkspaceModalProps {
   note?: Note | null;
@@ -216,19 +227,167 @@ const mapShapeType = (t: string | null): 'rect' | 'circle' | 'line' | 'triangle'
   return undefined;
 };
 
+// 60fps 드로잉 최적화: 확정된 필기/형광펜/도형 레이어를 메모이제이션하여 드로잉 중 재계산 차단
+const CommittedDocumentStrokesLayer = React.memo(
+  ({
+    strokes,
+    selectedStrokeIds,
+  }: {
+    strokes: StrokeWithPage[];
+    selectedStrokeIds: string[];
+  }) => {
+    const selectedSet = React.useMemo(() => new Set(selectedStrokeIds), [selectedStrokeIds]);
+
+    return (
+      <>
+        {/* 1. 형광펜 레이어 (반투명으로 글씨 뒤로 깔림) */}
+        {strokes
+          .filter((s) => s.tool === 'highlighter')
+          .map((stroke) => {
+            const isSel = selectedSet.has(stroke.id);
+            return (
+              <SvgPath
+                key={stroke.id}
+                d={pointsToSvgPath(
+                  stroke.points,
+                  stroke.isPolygon || stroke.shapeType === 'rect' || stroke.shapeType === 'triangle',
+                  stroke.shapeType
+                )}
+                stroke={stroke.color}
+                strokeWidth={stroke.width || 24}
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity={isSel ? 0.75 : 0.38}
+              />
+            );
+          })}
+
+        {/* 2. 일반 펜/만년필 및 기하 도형 레이어 */}
+        {strokes
+          .filter((s) => s.tool !== 'highlighter')
+          .map((stroke) => {
+            const isSel = selectedSet.has(stroke.id);
+            if (stroke.tool === 'shape' && stroke.shapeStart && stroke.shapeEnd) {
+              const s = stroke.shapeStart;
+              const e = stroke.shapeEnd;
+              if (stroke.shapeType === 'rect') {
+                const rx = Math.min(s.x, e.x);
+                const ry = Math.min(s.y, e.y);
+                const rw = Math.max(2, Math.abs(e.x - s.x));
+                const rh = Math.max(2, Math.abs(e.y - s.y));
+                return (
+                  <Rect
+                    key={stroke.id}
+                    x={rx}
+                    y={ry}
+                    width={rw}
+                    height={rh}
+                    stroke={stroke.color}
+                    strokeWidth={stroke.width}
+                    strokeDasharray={isSel ? '4,4' : undefined}
+                    fill="none"
+                    rx={4}
+                  />
+                );
+              }
+              if (stroke.shapeType === 'circle') {
+                const cx = (s.x + e.x) / 2;
+                const cy = (s.y + e.y) / 2;
+                const r = Math.max(2, Math.hypot(e.x - s.x, e.y - s.y) / 2);
+                return (
+                  <Circle
+                    key={stroke.id}
+                    cx={cx}
+                    cy={cy}
+                    r={r}
+                    stroke={stroke.color}
+                    strokeWidth={stroke.width}
+                    strokeDasharray={isSel ? '4,4' : undefined}
+                    fill="none"
+                  />
+                );
+              }
+              if (stroke.shapeType === 'arrow') {
+                const angle = Math.atan2(e.y - s.y, e.x - s.x);
+                const headLen = Math.max(12, stroke.width * 3);
+                const lx = e.x - headLen * Math.cos(angle - Math.PI / 6);
+                const ly = e.y - headLen * Math.sin(angle - Math.PI / 6);
+                const rx = e.x - headLen * Math.cos(angle + Math.PI / 6);
+                const ry = e.y - headLen * Math.sin(angle + Math.PI / 6);
+                return (
+                  <React.Fragment key={stroke.id}>
+                    <SvgLine
+                      x1={s.x}
+                      y1={s.y}
+                      x2={e.x}
+                      y2={e.y}
+                      stroke={stroke.color}
+                      strokeWidth={stroke.width}
+                      strokeDasharray={isSel ? '4,4' : undefined}
+                      strokeLinecap="round"
+                    />
+                    <SvgPath
+                      d={`M ${lx} ${ly} L ${e.x} ${e.y} L ${rx} ${ry}`}
+                      stroke={stroke.color}
+                      strokeWidth={stroke.width}
+                      fill="none"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </React.Fragment>
+                );
+              }
+              return (
+                <SvgLine
+                  key={stroke.id}
+                  x1={s.x}
+                  y1={s.y}
+                  x2={e.x}
+                  y2={e.y}
+                  stroke={stroke.color}
+                  strokeWidth={stroke.width}
+                  strokeDasharray={isSel ? '4,4' : undefined}
+                  strokeLinecap="round"
+                />
+              );
+            }
+
+            const pathData = pointsToSvgPath(
+              stroke.points,
+              stroke.isPolygon || stroke.shapeType === 'rect' || stroke.shapeType === 'triangle',
+              stroke.shapeType
+            );
+            return (
+              <SvgPath
+                key={stroke.id}
+                d={pathData}
+                stroke={stroke.color}
+                strokeWidth={stroke.width}
+                strokeDasharray={isSel ? '4,4' : undefined}
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity={1}
+              />
+            );
+          })}
+      </>
+    );
+  }
+);
+
 export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
   note: initialNote,
   initialMode = 'pdf',
   onClose,
 }) => {
-  const {
-    notes,
-    addNote,
-    updateNote,
-    deleteNote,
-    writingSoundEnabled,
-    setWritingSoundEnabled,
-  } = useNoteStore();
+  const notes = useNoteStore((s) => s.notes);
+  const writingSoundEnabled = useNoteStore((s) => s.writingSoundEnabled);
+  const addNote = useNoteStore((s) => s.addNote);
+  const updateNote = useNoteStore((s) => s.updateNote);
+  const deleteNote = useNoteStore((s) => s.deleteNote);
+  const setWritingSoundEnabled = useNoteStore((s) => s.setWritingSoundEnabled);
 
   const isPdfMode = initialMode === 'pdf' || (initialNote?.noteType === 'pdf') || !!initialNote?.pdfUri;
 
@@ -269,11 +428,37 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
   const [undoStack, setUndoStack] = useState<StrokeWithPage[][]>([]);
   const [redoStack, setRedoStack] = useState<StrokeWithPage[][]>([]);
 
-  // 툴박스 도구 설정 (Goodnotes / Notewise fragment_sketch_toolbox)
+  // 툴박스 도구 설정 (Goodnotes / Notewise / Flexcil 블록 발췌 통합)
   const [activeTool, setActiveTool] = useState<
-    'hand' | 'fountain' | 'pen' | 'highlighter' | 'eraser' | 'shape' | 'text' | 'lasso' | 'laser'
+    'hand' | 'fountain' | 'pen' | 'highlighter' | 'eraser' | 'shape' | 'text' | 'lasso' | 'snippet' | 'laser'
   >('fountain');
   const [shapeType, setShapeType] = useState<'rect' | 'circle' | 'arrow' | 'line'>('rect');
+
+  // Flexcil / LiquidText 스타일 PDF 블록 지정 캡처 & 복사 / 노트로 보내기 상태
+  const [snippetDraftRect, setSnippetDraftRect] = useState<{
+    startX: number;
+    startY: number;
+    currentX: number;
+    currentY: number;
+  } | null>(null);
+  const snippetDraftRectRef = useRef(snippetDraftRect);
+  snippetDraftRectRef.current = snippetDraftRect;
+  const [capturedBlockRect, setCapturedBlockRect] = useState<BlockRect | null>(null);
+  const [capturedBlockResult, setCapturedBlockResult] = useState<CapturedBlockResult | null>(null);
+  const [isAppendNotePickerOpen, setIsAppendNotePickerOpen] = useState(false);
+
+  // Flexcil / Samsung Notes 스타일 분할 화면 사이드 노트 상태
+  const [isSideNoteOpen, setIsSideNoteOpen] = useState(false);
+  const [sideLinkedNoteId, setSideLinkedNoteId] = useState<string | null>(null);
+  const [sideNoteTitle, setSideNoteTitle] = useState<string>(
+    `${(initialNote?.title || 'PDF 문서').replace(/\.pdf$/i, '')} 요약 노트`
+  );
+  const [sideNoteContent, setSideNoteContent] = useState<string>('');
+  const [sideNoteSnippets, setSideNoteSnippets] = useState<SideNoteSnippetItem[]>([]);
+
+  // 데스크톱 Spacebar 꾹 누르기 임시 손바닥 스크롤 상태
+  const [isSpacePanning, setIsSpacePanning] = useState(false);
+  const isSpacePanRef = useRef(false);
 
   // Goodnotes 6 시그니처: 프레젠테이션 레이저 포인터 상태
   const [laserPoint, setLaserPoint] = useState<{ x: number; y: number } | null>(null);
@@ -728,13 +913,294 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
     setStrokes(nextSnapshot);
   };
 
-  // 데스크톱 Web 단축키 핸들러 (Ctrl+Z: 실행 취소, Ctrl+Y: 다시 실행, Esc: 모달/선택 해제, Delete: 올가미 객체 삭제)
+  // 페이지 전환 시 열려 있던 블록 발췌 프레임 초기화
+  useEffect(() => {
+    setCapturedBlockRect(null);
+    setCapturedBlockResult(null);
+    setSnippetDraftRect(null);
+    setIsAppendNotePickerOpen(false);
+  }, [currentPage]);
+
+  // Flexcil / LiquidText 스타일 PDF 영역 블록 캡처 확정 엔진
+  const finalizeSnippetCapture = (startX: number, startY: number, endX: number, endY: number) => {
+    const x = Math.min(startX, endX);
+    const y = Math.min(startY, endY);
+    const width = Math.abs(endX - startX);
+    const height = Math.abs(endY - startY);
+
+    if (width < 16 || height < 16) {
+      setCapturedBlockRect(null);
+      setCapturedBlockResult(null);
+      return;
+    }
+
+    const cropRect: BlockRect = { x, y, width, height };
+    const pageObj = isPdfMode && activeDocument?.pages[currentPageRef.current - 1]
+      ? {
+          pageNumber: currentPageRef.current,
+          totalPages,
+          title: activeDocument.pages[currentPageRef.current - 1].title,
+          subtitle: activeDocument.pages[currentPageRef.current - 1].subtitle,
+          content: activeDocument.pages[currentPageRef.current - 1].content,
+          docName: title || 'PDF 문서.pdf',
+        }
+      : null;
+
+    const pageStrokes = strokesRef.current.filter((s) => (s.pageIndex || 1) === currentPageRef.current);
+    const pageTextBoxes = textBoxes.filter((t) => (t.pageIndex || 1) === currentPageRef.current);
+
+    const captured = captureDocumentBlockSnapshot({
+      cropRect,
+      pageWidth: pageLayout.width || 720,
+      pageHeight: pageLayout.height || 1018,
+      isPdfMode,
+      isNightMode,
+      paperTemplate: pageTemplates[currentPageRef.current] || paperTemplate,
+      pdfPage: pageObj,
+      strokes: pageStrokes,
+      textBoxes: pageTextBoxes,
+    });
+
+    setCapturedBlockRect(cropRect);
+    setCapturedBlockResult(captured);
+    setExportToastMessage(
+      captured.extractedText
+        ? `✂️ 블록 영역 및 텍스트(${captured.extractedText.length}자) 지정 완료! 복사 또는 노트로 보내기 가능`
+        : '✂️ 블록 영역 캡처 완료! 복사하거나 노트로 가져올 수 있습니다'
+    );
+    setTimeout(() => setExportToastMessage(null), 2600);
+  };
+
+  // 1. 지정된 PDF 블록 클립보드 복사 (이미지 + 발췌 텍스트 동시 복사)
+  const handleCopyCapturedBlock = async () => {
+    if (!capturedBlockResult) return;
+    const mode = await copyBlockToClipboard(
+      capturedBlockResult.imageDataUrl,
+      capturedBlockResult.extractedText
+    );
+    const msg =
+      mode === 'image+text'
+        ? '📋 PDF 블록(고화질 이미지 + 텍스트)이 클립보드에 복사되었습니다!'
+        : mode === 'image'
+        ? '📋 PDF 블록 이미지가 클립보드에 복사되었습니다!'
+        : mode === 'text'
+        ? '📋 PDF 발췌 텍스트가 클립보드에 복사되었습니다!'
+        : '⚠️ 클립보드 복사에 실패했습니다.';
+    setExportToastMessage(msg);
+    setTimeout(() => setExportToastMessage(null), 2400);
+  };
+
+  // 2. 지정된 PDF 블록을 새 스티커 노트로 즉시 가져오기
+  const handleSendBlockToNewNote = () => {
+    if (!capturedBlockResult) return;
+    const cleanDoc = (title || 'PDF 문서').replace(/\.pdf$/i, '');
+    const pNum = capturedBlockResult.pageNumber;
+    const citation = `[출처: ${title || 'PDF 문서'} · P.${pNum}]`;
+    const bodyText = capturedBlockResult.extractedText
+      ? `${capturedBlockResult.extractedText}\n\n${citation}`
+      : `${citation} 블록 발췌 이미지입니다.`;
+
+    const newImages: NoteImage[] = capturedBlockResult.imageDataUrl
+      ? [
+          {
+            id: `pdfsnip_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            uri: capturedBlockResult.imageDataUrl,
+            caption: `${cleanDoc} (P.${pNum} 블록 발췌)`,
+            placement: 'inline',
+            size: 'large',
+          },
+        ]
+      : [];
+
+    addNote({
+      title: `📄 ${cleanDoc} (P.${pNum} 발췌)`,
+      content: bodyText,
+      color: 'yellow',
+      decoStyle: 'tape',
+      images: newImages,
+      checklist: [],
+      tags: ['PDF발췌', `P${pNum}`],
+      isPinned: false,
+      isLocked: false,
+      boardId: 'ideas',
+      noteType: 'text',
+      paperTemplate: 'lined',
+    });
+
+    setCapturedBlockRect(null);
+    setCapturedBlockResult(null);
+    setExportToastMessage(`✨ '📄 ${cleanDoc} (P.${pNum} 발췌)' 새 스티커 노트로 저장되었습니다!`);
+    setTimeout(() => setExportToastMessage(null), 2800);
+  };
+
+  // 3. 지정된 PDF 블록을 기존 스티커 노트에 이어 붙이기
+  const handleAppendBlockToExistingNote = (targetNote: Note) => {
+    if (!capturedBlockResult) return;
+    const cleanDoc = (title || 'PDF 문서').replace(/\.pdf$/i, '');
+    const pNum = capturedBlockResult.pageNumber;
+    const citationBlock = capturedBlockResult.extractedText
+      ? `\n\n📌 [${cleanDoc} · P.${pNum} 발췌]\n${capturedBlockResult.extractedText}`
+      : `\n\n📌 [${cleanDoc} · P.${pNum} 이미지 발췌]`;
+
+    const updatedImages: NoteImage[] = [...(targetNote.images || [])];
+    if (capturedBlockResult.imageDataUrl) {
+      updatedImages.push({
+        id: `pdfsnip_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        uri: capturedBlockResult.imageDataUrl,
+        caption: `${cleanDoc} (P.${pNum} 발췌)`,
+        placement: 'inline',
+        size: 'large',
+      });
+    }
+
+    const nextTags = Array.from(new Set([...(targetNote.tags || []), 'PDF발췌']));
+    updateNote(targetNote.id, {
+      content: `${targetNote.content || ''}${citationBlock}`.trim(),
+      images: updatedImages,
+      tags: nextTags,
+    });
+
+    setIsAppendNotePickerOpen(false);
+    setCapturedBlockRect(null);
+    setCapturedBlockResult(null);
+    setExportToastMessage(`📎 '${targetNote.title || '제목 없음'}' 노트에 PDF 블록이 추가되었습니다!`);
+    setTimeout(() => setExportToastMessage(null), 2800);
+  };
+
+  // 4. 지정된 PDF 블록을 우측 분할 사이드 노트로 즉시 보내기 (Flexcil / LiquidText 시그니처)
+  const handleSendBlockToSideNote = () => {
+    if (!capturedBlockResult) return;
+    const newItem: SideNoteSnippetItem = {
+      id: `sidesnip_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      imageDataUrl: capturedBlockResult.imageDataUrl,
+      extractedText: capturedBlockResult.extractedText,
+      pageNumber: capturedBlockResult.pageNumber,
+      docName: capturedBlockResult.docName,
+      createdAt: Date.now(),
+    };
+    setSideNoteSnippets((prev) => [newItem, ...prev]);
+    if (capturedBlockResult.extractedText) {
+      setSideNoteContent((prev) => {
+        const prefix = prev.trim() ? `${prev.trim()}\n\n` : '';
+        return `${prefix}[P.${capturedBlockResult.pageNumber}] ${capturedBlockResult.extractedText}`;
+      });
+    }
+    if (!sideNoteTitle.trim()) {
+      setSideNoteTitle(`${(title || 'PDF 문서').replace(/\.pdf$/i, '')} 요약 노트`);
+    }
+    setIsSideNoteOpen(true);
+    setCapturedBlockRect(null);
+    setCapturedBlockResult(null);
+    setExportToastMessage(`📝 P.${capturedBlockResult.pageNumber} 발췌 블록이 분할 사이드 노트에 추가되었습니다!`);
+    setTimeout(() => setExportToastMessage(null), 2400);
+  };
+
+  // 5. 지정된 PDF 블록을 형광펜 하이라이트 밴드로 변환
+  const handleHighlightCapturedBlock = () => {
+    if (!capturedBlockRect) return;
+    const midY = capturedBlockRect.y + capturedBlockRect.height / 2;
+    const hlStroke: StrokeWithPage = {
+      id: `hlblk_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      points: [
+        { x: capturedBlockRect.x + 4, y: midY },
+        { x: capturedBlockRect.x + capturedBlockRect.width - 4, y: midY },
+      ],
+      color: '#FACC15',
+      width: Math.max(18, Math.min(84, capturedBlockRect.height)),
+      tool: 'highlighter',
+      isRuler: true,
+      pageIndex: currentPageRef.current,
+    };
+    undoStackRef.current = [...undoStackRef.current, strokesRef.current];
+    redoStackRef.current = [];
+    setUndoStack(undoStackRef.current);
+    setRedoStack([]);
+    const next = [...strokesRef.current, hlStroke];
+    strokesRef.current = next;
+    setStrokes(next);
+    setCapturedBlockRect(null);
+    setCapturedBlockResult(null);
+    setExportToastMessage('🖍️ 선택한 블록 영역에 형광펜 강조가 적용되었습니다!');
+    setTimeout(() => setExportToastMessage(null), 1800);
+  };
+
+  // 분할 사이드 노트 연결 대상 전환
+  const handleChangeSideLinkedNote = (noteId: string | null) => {
+    setSideLinkedNoteId(noteId);
+    if (noteId) {
+      const target = notes.find((n) => n.id === noteId);
+      if (target) {
+        setSideNoteTitle(target.title || '');
+        setSideNoteContent(target.content || '');
+      }
+    } else {
+      setSideNoteTitle(`${(title || 'PDF 문서').replace(/\.pdf$/i, '')} 요약 노트`);
+      setSideNoteContent('');
+    }
+  };
+
+  // 분할 사이드 노트 보드 저장/업데이트
+  const handleSaveSideNoteToBoard = () => {
+    const cleanTitle = sideNoteTitle.trim() || `${(title || 'PDF 문서').replace(/\.pdf$/i, '')} 요약 노트`;
+    const snippetImages: NoteImage[] = sideNoteSnippets
+      .filter((s) => !!s.imageDataUrl)
+      .map((s) => ({
+        id: `img_${s.id}`,
+        uri: s.imageDataUrl as string,
+        caption: `${s.docName.replace(/\.pdf$/i, '')} (P.${s.pageNumber} 발췌)`,
+        placement: 'inline',
+        size: 'large',
+      }));
+
+    if (sideLinkedNoteId) {
+      const existing = notes.find((n) => n.id === sideLinkedNoteId);
+      if (existing) {
+        updateNote(existing.id, {
+          title: cleanTitle,
+          content: sideNoteContent,
+          images: [...(existing.images || []), ...snippetImages],
+          tags: Array.from(new Set([...(existing.tags || []), 'PDF요약'])),
+        });
+        setSideNoteSnippets([]);
+        setExportToastMessage(`💾 '${cleanTitle}' 노트에 사이드 메모와 발췌 블록이 저장되었습니다!`);
+        setTimeout(() => setExportToastMessage(null), 2600);
+        return;
+      }
+    }
+
+    addNote({
+      title: cleanTitle,
+      content: sideNoteContent || `[${title || 'PDF 문서'} 연동 사이드 요약 노트]`,
+      color: 'yellow',
+      decoStyle: 'tape',
+      images: snippetImages,
+      checklist: [],
+      tags: ['PDF요약', '발췌노트'],
+      isPinned: false,
+      isLocked: false,
+      boardId: 'ideas',
+      noteType: 'text',
+      paperTemplate: 'lined',
+    });
+    setSideNoteSnippets([]);
+    setExportToastMessage(`✨ '${cleanTitle}' 새 스티커 노트가 보드에 저장되었습니다!`);
+    setTimeout(() => setExportToastMessage(null), 2600);
+  };
+
+  // 데스크톱 Web 단축키 & 파워 제스처 핸들러 (Ctrl+Z/Y, Ctrl+F 검색, Space 꾹 눌러 임시 손바닥 스크롤, PageUp/PageDown, Ctrl+Wheel 줌)
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof window === 'undefined') return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
       if (tag === 'input' || tag === 'textarea') return;
+
+      if (e.code === 'Space' && !e.repeat) {
+        e.preventDefault();
+        isSpacePanRef.current = true;
+        setIsSpacePanning(true);
+        return;
+      }
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault();
@@ -746,11 +1212,24 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
         e.preventDefault();
         handleRedo();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        setIsSearchOpen((prev) => !prev);
+      } else if (e.key === 'PageDown' || (e.altKey && e.key === 'ArrowRight')) {
+        e.preventDefault();
+        setCurrentPage((p) => Math.min(totalPages, p + 1));
+      } else if (e.key === 'PageUp' || (e.altKey && e.key === 'ArrowLeft')) {
+        e.preventDefault();
+        setCurrentPage((p) => Math.max(1, p - 1));
       } else if (e.key === 'Escape') {
         if (selectedStrokeIdsRef.current.length > 0) {
           setSelectedStrokeIds([]);
           setSelectionBBox(null);
         }
+        setCapturedBlockRect(null);
+        setCapturedBlockResult(null);
+        setSnippetDraftRect(null);
+        setIsAppendNotePickerOpen(false);
         setSelectedTextBoxId(null);
         setIsColorPickerOpen(false);
         setIsTemplateMenuOpen(false);
@@ -766,9 +1245,30 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
       }
     };
 
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        isSpacePanRef.current = false;
+        setIsSpacePanning(false);
+      }
+    };
+
+    const handleWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const delta = e.deltaY < 0 ? 0.1 : -0.1;
+        setZoomLevel((z) => Math.max(0.5, Math.min(2.2, Number((z + delta).toFixed(2)))));
+      }
+    };
+
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undoStack, redoStack, selectedStrokeIds]);
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('wheel', handleWheel);
+    };
+  }, [undoStack, redoStack, selectedStrokeIds, totalPages]);
 
   // 지우개 터치/드래그 시 해당 스트로크 정밀 검출 및 동기 삭제 (Goodnotes 6 / Notewise 형광펜 전용 지우개 지원)
   const handleEraseAt = (x: number, y: number) => {
@@ -1385,6 +1885,19 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           return;
         }
 
+        if (activeToolRef.current === 'snippet') {
+          setCapturedBlockRect(null);
+          setCapturedBlockResult(null);
+          setIsAppendNotePickerOpen(false);
+          setSnippetDraftRect({
+            startX: locationX,
+            startY: locationY,
+            currentX: locationX,
+            currentY: locationY,
+          });
+          return;
+        }
+
         if (activeToolRef.current === 'lasso') {
           const sBBox = selectionBBoxRef.current;
           if (
@@ -1462,6 +1975,15 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           return;
         }
 
+        if (activeToolRef.current === 'snippet') {
+          if (snippetDraftRectRef.current) {
+            setSnippetDraftRect((prev) =>
+              prev ? { ...prev, currentX: locationX, currentY: locationY } : null
+            );
+          }
+          return;
+        }
+
         if (activeToolRef.current === 'lasso') {
           if (isDraggingSelection && lassoDragStartRef.current && selectionBBoxRef.current) {
             const dx = locationX - lassoDragStartRef.current.x;
@@ -1533,6 +2055,15 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           laserFadeTimerRef.current = setTimeout(() => {
             setLaserTrail([]);
           }, 500);
+          return;
+        }
+
+        if (activeToolRef.current === 'snippet') {
+          const draft = snippetDraftRectRef.current;
+          setSnippetDraftRect(null);
+          if (draft) {
+            finalizeSnippetCapture(draft.startX, draft.startY, draft.currentX, draft.currentY);
+          }
           return;
         }
 
@@ -1686,7 +2217,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
   };
 
   const startHandDragScroll = (e: any) => {
-    if (Platform.OS !== 'web' || activeToolRef.current !== 'hand') return;
+    if (Platform.OS !== 'web' || (activeToolRef.current !== 'hand' && !isSpacePanRef.current)) return;
     if (e._handScrollHandled) return;
     const targetTag = (e.target as HTMLElement)?.tagName?.toLowerCase?.() || '';
     if (targetTag === 'input' || targetTag === 'textarea' || targetTag === 'button') return;
@@ -1775,12 +2306,12 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
     window.addEventListener('mouseup', onHandUp);
   };
 
-  // 데스크톱 웹 마우스 드래그 핸들러 (손바닥 Grab-to-Scroll + 60fps 무끊김 필기 + 사각사각 ASMR 사운드)
+  // 데스크톱 웹 마우스 드래그 핸들러 (손바닥 Grab-to-Scroll + Space 임시 패닝 + 블록 발췌 + 60fps 무끊김 필기)
   const handleWebMouseDown = (e: any) => {
     if (Platform.OS !== 'web') return;
 
-    // 손바닥 도구(Hand Tool): 꾹 누르고 위아래/좌우로 밀면 자연스럽게 스크롤 + 관성 모멘텀
-    if (activeToolRef.current === 'hand') {
+    // 손바닥 도구(Hand Tool) 또는 Spacebar 꾹 누른 상태: 꾹 누르고 위아래/좌우 밀면 자연스럽게 스크롤 + 관성 모멘텀
+    if (activeToolRef.current === 'hand' || isSpacePanRef.current) {
       startHandDragScroll(e);
       return;
     }
@@ -1812,6 +2343,21 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
       if (laserFadeTimerRef.current) clearTimeout(laserFadeTimerRef.current);
       setLaserPoint({ x, y });
       setLaserTrail([{ x, y }]);
+      return;
+    }
+
+    // Flexcil / LiquidText 스타일 PDF 영역 블록 지정 캡처 & 발췌 도구
+    if (activeToolRef.current === 'snippet') {
+      e.preventDefault?.();
+      setCapturedBlockRect(null);
+      setCapturedBlockResult(null);
+      setIsAppendNotePickerOpen(false);
+      setSnippetDraftRect({
+        startX: x,
+        startY: y,
+        currentX: x,
+        currentY: y,
+      });
       return;
     }
 
@@ -1899,6 +2445,13 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
         const next = [...prev, { x, y }];
         return next.length > 25 ? next.slice(next.length - 25) : next;
       });
+      return;
+    }
+
+    if (activeToolRef.current === 'snippet') {
+      if (snippetDraftRectRef.current) {
+        setSnippetDraftRect((prev) => (prev ? { ...prev, currentX: x, currentY: y } : null));
+      }
       return;
     }
 
@@ -1996,6 +2549,15 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
       laserFadeTimerRef.current = setTimeout(() => {
         setLaserTrail([]);
       }, 500);
+      return;
+    }
+
+    if (activeToolRef.current === 'snippet') {
+      const draft = snippetDraftRectRef.current;
+      setSnippetDraftRect(null);
+      if (draft) {
+        finalizeSnippetCapture(draft.startX, draft.startY, draft.currentX, draft.currentY);
+      }
       return;
     }
 
@@ -2398,18 +2960,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
                 return next;
               });
             }}
-            {...(Platform.OS === 'web'
-              ? ({
-                  onClick: () => {
-                    setIsNightMode((prev) => {
-                      const next = !prev;
-                      setExportToastMessage(next ? '🌙 야간 모드가 켜졌습니다 (눈부심 방지)' : '☀️ 주간 모드로 전환되었습니다');
-                      setTimeout(() => setExportToastMessage(null), 1800);
-                      return next;
-                    });
-                  },
-                } as any)
-              : {})}
           >
             {isNightMode ? (
               <Sun size={14} color="#F59E0B" />
@@ -2425,7 +2975,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
             style={[styles.actionBtn, undoStack.length === 0 && styles.actionBtnDisabled]}
             disabled={undoStack.length === 0}
             onPress={handleUndo}
-            {...(Platform.OS === 'web' ? ({ onClick: handleUndo } as any) : {})}
           >
             <Undo2 size={19} color={undoStack.length === 0 ? '#CBD5E1' : '#475569'} />
           </TouchableOpacity>
@@ -2434,7 +2983,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
             style={[styles.actionBtn, redoStack.length === 0 && styles.actionBtnDisabled]}
             disabled={redoStack.length === 0}
             onPress={handleRedo}
-            {...(Platform.OS === 'web' ? ({ onClick: handleRedo } as any) : {})}
           >
             <Redo2 size={19} color={redoStack.length === 0 ? '#CBD5E1' : '#475569'} />
           </TouchableOpacity>
@@ -2443,16 +2991,33 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           <TouchableOpacity
             style={[styles.actionBtn, isSearchOpen && styles.actionBtnActiveBlue]}
             onPress={() => setIsSearchOpen((prev) => !prev)}
-            {...(Platform.OS === 'web' ? ({ onClick: () => setIsSearchOpen((prev) => !prev) } as any) : {})}
           >
             <Search size={19} color={isSearchOpen ? '#2563EB' : '#475569'} />
+          </TouchableOpacity>
+
+          {/* Flexcil 스타일 분할 사이드 노트 패널 토글 */}
+          <TouchableOpacity
+            style={[styles.sideNoteToggleBtn, isSideNoteOpen && styles.sideNoteToggleBtnActive]}
+            onPress={() => {
+              setPdfWorkspaceTab('annotate');
+              setIsSideNoteOpen((prev) => !prev);
+            }}
+          >
+            <PanelRight size={15} color={isSideNoteOpen ? '#B45309' : '#475569'} />
+            <Text
+              style={[
+                styles.sideNoteToggleText,
+                isSideNoteOpen && styles.sideNoteToggleTextActive,
+              ]}
+            >
+              사이드 노트{sideNoteSnippets.length > 0 ? ` (${sideNoteSnippets.length})` : ''}
+            </Text>
           </TouchableOpacity>
 
           {/* 속지 템플릿 변경 버튼 */}
           <TouchableOpacity
             style={[styles.actionBtn, isTemplateMenuOpen && styles.actionBtnActiveBlue]}
             onPress={() => setIsTemplateMenuOpen((prev) => !prev)}
-            {...(Platform.OS === 'web' ? ({ onClick: () => setIsTemplateMenuOpen((prev) => !prev) } as any) : {})}
           >
             <BookOpen size={19} color={isTemplateMenuOpen ? '#2563EB' : '#475569'} />
           </TouchableOpacity>
@@ -2461,7 +3026,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           <TouchableOpacity
             style={[styles.actionBtn, isRecording && styles.recordingActiveBtn]}
             onPress={() => setIsRecording((prev) => !prev)}
-            {...(Platform.OS === 'web' ? ({ onClick: () => setIsRecording((prev) => !prev) } as any) : {})}
           >
             <Mic size={19} color={isRecording ? '#DC2626' : '#475569'} />
           </TouchableOpacity>
@@ -2471,7 +3035,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
             <TouchableOpacity
               style={[styles.actionBtn, isAudioDockOpen && styles.actionBtnActiveBlue]}
               onPress={() => setIsAudioDockOpen((prev) => !prev)}
-              {...(Platform.OS === 'web' ? ({ onClick: () => setIsAudioDockOpen((prev) => !prev) } as any) : {})}
             >
               <Volume2 size={19} color={isAudioDockOpen ? '#2563EB' : '#475569'} />
               <View pointerEvents="none" style={styles.audioCountBadge}>
@@ -2484,7 +3047,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           <TouchableOpacity
             style={[styles.actionBtn, isOverviewOpen && styles.overviewActiveBtn]}
             onPress={() => setIsOverviewOpen((prev) => !prev)}
-            {...(Platform.OS === 'web' ? ({ onClick: () => setIsOverviewOpen((prev) => !prev) } as any) : {})}
           >
             <Layers size={19} color={isOverviewOpen ? '#2563EB' : '#475569'} />
           </TouchableOpacity>
@@ -2493,7 +3055,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           <TouchableOpacity
             style={styles.actionBtn}
             onPress={handlePickDocument}
-            {...(Platform.OS === 'web' ? ({ onClick: handlePickDocument } as any) : {})}
           >
             <Upload size={19} color="#475569" />
           </TouchableOpacity>
@@ -2502,7 +3063,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           <TouchableOpacity
             style={[styles.actionBtn, isExportModalOpen && styles.actionBtnActiveBlue]}
             onPress={() => setIsExportModalOpen(true)}
-            {...(Platform.OS === 'web' ? ({ onClick: () => setIsExportModalOpen(true) } as any) : {})}
           >
             <Share2 size={19} color={isExportModalOpen ? '#2563EB' : '#475569'} />
           </TouchableOpacity>
@@ -2511,7 +3071,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           <TouchableOpacity
             style={styles.saveExitBtn}
             onPress={handleSaveAndExit}
-            {...(Platform.OS === 'web' ? ({ onClick: handleSaveAndExit } as any) : {})}
           >
             <Check size={16} color="#FFFFFF" strokeWidth={3} />
             <Text style={styles.saveExitText}>저장</Text>
@@ -2529,7 +3088,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
                 pdfWorkspaceTab === 'annotate' && styles.acrobatTabBtnActiveBlue,
               ]}
               onPress={() => setPdfWorkspaceTab('annotate')}
-              {...(Platform.OS === 'web' ? ({ onClick: () => setPdfWorkspaceTab('annotate') } as any) : {})}
             >
               <Edit3
                 size={13}
@@ -2551,7 +3109,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
                 pdfWorkspaceTab === 'organize' && styles.acrobatTabBtnActiveGreen,
               ]}
               onPress={() => setPdfWorkspaceTab('organize')}
-              {...(Platform.OS === 'web' ? ({ onClick: () => setPdfWorkspaceTab('organize') } as any) : {})}
             >
               <LayoutGrid
                 size={13}
@@ -2573,7 +3130,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
                 pdfWorkspaceTab === 'merge' && styles.acrobatTabBtnActivePurple,
               ]}
               onPress={() => setPdfWorkspaceTab('merge')}
-              {...(Platform.OS === 'web' ? ({ onClick: () => setPdfWorkspaceTab('merge') } as any) : {})}
             >
               <Combine
                 size={13}
@@ -2595,7 +3151,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
                 pdfWorkspaceTab === 'split' && styles.acrobatTabBtnActiveRed,
               ]}
               onPress={() => setPdfWorkspaceTab('split')}
-              {...(Platform.OS === 'web' ? ({ onClick: () => setPdfWorkspaceTab('split') } as any) : {})}
             >
               <Scissors
                 size={13}
@@ -2612,14 +3167,49 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
             </TouchableOpacity>
           </View>
 
-          <TouchableOpacity
-            style={styles.acrobatOpenHubBtn}
-            onPress={() => setIsPdfLauncherOpen(true)}
-            {...(Platform.OS === 'web' ? ({ onClick: () => setIsPdfLauncherOpen(true) } as any) : {})}
-          >
-            <Upload size={12} color="#2563EB" />
-            <Text style={styles.acrobatOpenHubText}>다른 PDF 열기 / 새 문서 허브</Text>
-          </TouchableOpacity>
+          <View style={styles.acrobatRightGroup}>
+            <TouchableOpacity
+              style={[
+                styles.acrobatSnippetQuickBtn,
+                pdfWorkspaceTab === 'annotate' &&
+                  activeTool === 'snippet' &&
+                  styles.acrobatSnippetQuickBtnActive,
+              ]}
+              onPress={() => {
+                setPdfWorkspaceTab('annotate');
+                setActiveTool('snippet');
+                setExportToastMessage(
+                  '✂️ 블록 발췌 모드: PDF에서 복사하거나 노트로 가져올 영역을 드래그하세요!'
+                );
+                setTimeout(() => setExportToastMessage(null), 2600);
+              }}
+            >
+              <Crop
+                size={12}
+                color={
+                  pdfWorkspaceTab === 'annotate' && activeTool === 'snippet' ? '#FFFFFF' : '#B45309'
+                }
+              />
+              <Text
+                style={[
+                  styles.acrobatSnippetQuickText,
+                  pdfWorkspaceTab === 'annotate' &&
+                    activeTool === 'snippet' &&
+                    styles.acrobatSnippetQuickTextActive,
+                ]}
+              >
+                블록 복사 · 노트 발췌
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.acrobatOpenHubBtn}
+              onPress={() => setIsPdfLauncherOpen(true)}
+            >
+              <Upload size={12} color="#2563EB" />
+              <Text style={styles.acrobatOpenHubText}>다른 PDF 열기 / 새 문서 허브</Text>
+            </TouchableOpacity>
+          </View>
         </View>
       )}
 
@@ -3082,7 +3672,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           ref={canvasScrollRef}
           style={[
             styles.canvasScrollView,
-            Platform.OS === 'web' && activeTool === 'hand'
+            Platform.OS === 'web' && (activeTool === 'hand' || isSpacePanning)
               ? ({ cursor: isHandPanning ? 'grabbing' : 'grab', userSelect: 'none' } as any)
               : null,
           ]}
@@ -3095,7 +3685,7 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
               y: e.nativeEvent.contentOffset.y,
             };
           }}
-          {...(Platform.OS === 'web' && activeTool === 'hand'
+          {...(Platform.OS === 'web' && (activeTool === 'hand' || isSpacePanning)
             ? ({ onMouseDown: startHandDragScroll } as any)
             : {})}
         >
@@ -3160,25 +3750,19 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
               </View>
             )}
 
-            {/* 손글씨 & 기하 도형 실시간 벡터 SVG 오버레이 레이어 */}
+            {/* 손글씨 & 기하 도형 & PDF 블록 발췌 실시간 벡터 SVG 오버레이 레이어 */}
             <View
               style={[
                 StyleSheet.absoluteFill,
                 Platform.OS === 'web' &&
                   ({
                     cursor:
-                      activeTool === 'eraser'
-                        ? 'crosshair'
-                        : activeTool === 'hand'
+                      activeTool === 'hand' || isSpacePanning
                         ? isHandPanning
                           ? 'grabbing'
                           : 'grab'
                         : activeTool === 'text'
                         ? 'text'
-                        : activeTool === 'shape'
-                        ? 'crosshair'
-                        : activeTool === 'lasso'
-                        ? 'crosshair'
                         : 'crosshair',
                     userSelect: 'none',
                     touchAction: activeTool === 'hand' ? 'pan-y pan-x' : 'none',
@@ -3195,139 +3779,11 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
                 : {})}
             >
               <Svg style={StyleSheet.absoluteFill} width="100%" height="100%">
-                {/* 1. 형광펜 레이어 (Goodnotes / DrawNote 시그니처: 반투명으로 글씨 뒤로 깔림) */}
-                {currentPageStrokes
-                  .filter((s) => s.tool === 'highlighter')
-                  .map((stroke) => {
-                    const isSel = selectedStrokeIds.includes(stroke.id);
-                    return (
-                      <SvgPath
-                        key={stroke.id}
-                        d={pointsToSvgPath(
-                          stroke.points,
-                          stroke.isPolygon || stroke.shapeType === 'rect' || stroke.shapeType === 'triangle',
-                          stroke.shapeType
-                        )}
-                        stroke={stroke.color}
-                        strokeWidth={stroke.width || 24}
-                        fill="none"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        opacity={isSel ? 0.75 : 0.38}
-                      />
-                    );
-                  })}
-
-                {/* 2. 일반 펜/만년필 및 기하 도형 레이어 (선명하게 전면에 렌더링) */}
-                {currentPageStrokes
-                  .filter((s) => s.tool !== 'highlighter')
-                  .map((stroke) => {
-                    const isSel = selectedStrokeIds.includes(stroke.id);
-                    // 기하 도형 렌더링
-                    if (stroke.tool === 'shape' && stroke.shapeStart && stroke.shapeEnd) {
-                      const s = stroke.shapeStart;
-                      const e = stroke.shapeEnd;
-                      if (stroke.shapeType === 'rect') {
-                        const rx = Math.min(s.x, e.x);
-                        const ry = Math.min(s.y, e.y);
-                        const rw = Math.max(2, Math.abs(e.x - s.x));
-                        const rh = Math.max(2, Math.abs(e.y - s.y));
-                        return (
-                          <Rect
-                            key={stroke.id}
-                            x={rx}
-                            y={ry}
-                            width={rw}
-                            height={rh}
-                            stroke={stroke.color}
-                            strokeWidth={stroke.width}
-                            strokeDasharray={isSel ? '4,4' : undefined}
-                            fill="none"
-                            rx={4}
-                          />
-                        );
-                      }
-                      if (stroke.shapeType === 'circle') {
-                        const cx = (s.x + e.x) / 2;
-                        const cy = (s.y + e.y) / 2;
-                        const r = Math.max(2, Math.hypot(e.x - s.x, e.y - s.y) / 2);
-                        return (
-                          <Circle
-                            key={stroke.id}
-                            cx={cx}
-                            cy={cy}
-                            r={r}
-                            stroke={stroke.color}
-                            strokeWidth={stroke.width}
-                            strokeDasharray={isSel ? '4,4' : undefined}
-                            fill="none"
-                          />
-                        );
-                      }
-                      if (stroke.shapeType === 'arrow') {
-                        const angle = Math.atan2(e.y - s.y, e.x - s.x);
-                        const headLen = Math.max(12, stroke.width * 3);
-                        const lx = e.x - headLen * Math.cos(angle - Math.PI / 6);
-                        const ly = e.y - headLen * Math.sin(angle - Math.PI / 6);
-                        const rx = e.x - headLen * Math.cos(angle + Math.PI / 6);
-                        const ry = e.y - headLen * Math.sin(angle + Math.PI / 6);
-                        return (
-                          <React.Fragment key={stroke.id}>
-                            <SvgLine
-                              x1={s.x}
-                              y1={s.y}
-                              x2={e.x}
-                              y2={e.y}
-                              stroke={stroke.color}
-                              strokeWidth={stroke.width}
-                              strokeDasharray={isSel ? '4,4' : undefined}
-                              strokeLinecap="round"
-                            />
-                            <SvgPath
-                              d={`M ${lx} ${ly} L ${e.x} ${e.y} L ${rx} ${ry}`}
-                              stroke={stroke.color}
-                              strokeWidth={stroke.width}
-                              fill="none"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            />
-                          </React.Fragment>
-                        );
-                      }
-                      return (
-                        <SvgLine
-                          key={stroke.id}
-                          x1={s.x}
-                          y1={s.y}
-                          x2={e.x}
-                          y2={e.y}
-                          stroke={stroke.color}
-                          strokeWidth={stroke.width}
-                          strokeDasharray={isSel ? '4,4' : undefined}
-                          strokeLinecap="round"
-                        />
-                      );
-                    }
-
-                    const pathData = pointsToSvgPath(
-                      stroke.points,
-                      stroke.isPolygon || stroke.shapeType === 'rect' || stroke.shapeType === 'triangle',
-                      stroke.shapeType
-                    );
-                    return (
-                      <SvgPath
-                        key={stroke.id}
-                        d={pathData}
-                        stroke={stroke.color}
-                        strokeWidth={stroke.width}
-                        strokeDasharray={isSel ? '4,4' : undefined}
-                        fill="none"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        opacity={1}
-                      />
-                    );
-                  })}
+                {/* 메모이제이션된 확정 필기/형광펜/도형 레이어 (60fps 드로잉 중 재연산 0%) */}
+                <CommittedDocumentStrokesLayer
+                  strokes={currentPageStrokes}
+                  selectedStrokeIds={selectedStrokeIds}
+                />
 
                 {/* 실시간 직사각형 영역 선택 상자 (파란 점선 및 반투명 채우기) */}
                 {selectionRect && (
@@ -3341,6 +3797,21 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
                     strokeDasharray="6,4"
                     fill="rgba(37, 99, 235, 0.12)"
                     rx={3}
+                  />
+                )}
+
+                {/* Flexcil 스타일 실시간 PDF 블록 캡처 드래그 영역 (주황 점선) */}
+                {snippetDraftRect && (
+                  <Rect
+                    x={Math.min(snippetDraftRect.startX, snippetDraftRect.currentX)}
+                    y={Math.min(snippetDraftRect.startY, snippetDraftRect.currentY)}
+                    width={Math.max(1, Math.abs(snippetDraftRect.currentX - snippetDraftRect.startX))}
+                    height={Math.max(1, Math.abs(snippetDraftRect.currentY - snippetDraftRect.startY))}
+                    stroke="#D97706"
+                    strokeWidth={2.2}
+                    strokeDasharray="6,4"
+                    fill="rgba(245, 158, 11, 0.14)"
+                    rx={4}
                   />
                 )}
 
@@ -3542,6 +4013,123 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
               </View>
             )}
 
+            {/* Flexcil / LiquidText 스타일 PDF 블록 지정 캡처 프레임 & 플로팅 액션 바 (복사 / 새 노트 / 기존 노트 / 사이드 노트 / 강조) */}
+            {capturedBlockRect && capturedBlockResult && (
+              <View
+                style={[
+                  styles.snippetOverlayBox,
+                  {
+                    left: capturedBlockRect.x,
+                    top: capturedBlockRect.y,
+                    width: Math.max(40, capturedBlockRect.width),
+                    height: Math.max(30, capturedBlockRect.height),
+                  },
+                ]}
+                pointerEvents="box-none"
+              >
+                <View style={styles.snippetDashedFrame} pointerEvents="none" />
+                <View style={[styles.snippetCornerDot, { top: -5, left: -5 }]} pointerEvents="none" />
+                <View style={[styles.snippetCornerDot, { top: -5, right: -5 }]} pointerEvents="none" />
+                <View style={[styles.snippetCornerDot, { bottom: -5, left: -5 }]} pointerEvents="none" />
+                <View style={[styles.snippetCornerDot, { bottom: -5, right: -5 }]} pointerEvents="none" />
+
+                {/* 플로팅 액션 바 (상단 공간이 좁으면 블록 아래로 자동 배치) */}
+                <View
+                  style={[
+                    styles.snippetActionBar,
+                    capturedBlockRect.y < 76
+                      ? { bottom: -46, top: undefined }
+                      : { top: -46, bottom: undefined },
+                  ]}
+                >
+                  <TouchableOpacity
+                    style={[styles.snippetActionBtn, { backgroundColor: '#1E293B' }]}
+                    onPress={handleCopyCapturedBlock}
+                  >
+                    <ClipboardCopy size={12} color="#FFFFFF" />
+                    <Text style={styles.snippetActionBtnText}>복사</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.snippetActionBtn, { backgroundColor: '#2563EB' }]}
+                    onPress={handleSendBlockToNewNote}
+                  >
+                    <FilePlus2 size={12} color="#FFFFFF" />
+                    <Text style={styles.snippetActionBtnText}>새 노트로</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.snippetActionBtn, { backgroundColor: '#7C3AED' }]}
+                    onPress={() => setIsAppendNotePickerOpen((prev) => !prev)}
+                  >
+                    <Plus size={12} color="#FFFFFF" />
+                    <Text style={styles.snippetActionBtnText}>기존 노트에</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.snippetActionBtn, { backgroundColor: '#D97706' }]}
+                    onPress={handleSendBlockToSideNote}
+                  >
+                    <PanelRight size={12} color="#FFFFFF" />
+                    <Text style={styles.snippetActionBtnText}>사이드 노트</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.snippetActionBtn, { backgroundColor: '#059669' }]}
+                    onPress={handleHighlightCapturedBlock}
+                  >
+                    <Highlighter size={12} color="#FFFFFF" />
+                    <Text style={styles.snippetActionBtnText}>강조</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.snippetCloseBtn}
+                    onPress={() => {
+                      setCapturedBlockRect(null);
+                      setCapturedBlockResult(null);
+                      setIsAppendNotePickerOpen(false);
+                    }}
+                  >
+                    <X size={12} color="#94A3B8" />
+                  </TouchableOpacity>
+                </View>
+
+                {/* 기존 노트 선택 인라인 팝오버 */}
+                {isAppendNotePickerOpen && (
+                  <View
+                    style={[
+                      styles.appendNotePickerCard,
+                      capturedBlockRect.y < 76 ? { top: capturedBlockRect.height + 52 } : { top: 8 },
+                    ]}
+                  >
+                    <View style={styles.appendNotePickerHeader}>
+                      <Text style={styles.appendNotePickerTitle}>📎 발췌 블록을 추가할 기존 노트 선택</Text>
+                      <TouchableOpacity onPress={() => setIsAppendNotePickerOpen(false)}>
+                        <X size={13} color="#64748B" />
+                      </TouchableOpacity>
+                    </View>
+                    <ScrollView style={{ maxHeight: 190 }} nestedScrollEnabled>
+                      {notes
+                        .filter((n) => !n.isDeleted && !n.isArchived && n.id !== activeNoteId)
+                        .map((targetNote) => (
+                          <TouchableOpacity
+                            key={targetNote.id}
+                            style={styles.appendNoteItemBtn}
+                            onPress={() => handleAppendBlockToExistingNote(targetNote)}
+                          >
+                            <FileText size={13} color="#7C3AED" />
+                            <Text style={styles.appendNoteItemTitle} numberOfLines={1}>
+                              {targetNote.title || '제목 없음'}
+                            </Text>
+                            <Text style={styles.appendNoteItemTag}>추가 →</Text>
+                          </TouchableOpacity>
+                        ))}
+                    </ScrollView>
+                  </View>
+                )}
+              </View>
+            )}
+
             {/* 자유 텍스트 상자 목록 (Goodnotes / Notewise 스타일 탭하여 입력) */}
             {textBoxes
               .filter((t) => (t.pageIndex || 1) === currentPage)
@@ -3573,13 +4161,51 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
               ))}
           </View>
         </ScrollView>
+
+        {/* Flexcil / LiquidText 스타일 우측 분할 사이드 노트 패널 */}
+        {isSideNoteOpen && (
+          <PdfSideNoteDrawer
+            docTitle={title}
+            allNotes={notes}
+            currentNoteId={activeNoteId}
+            linkedNoteId={sideLinkedNoteId}
+            sideTitle={sideNoteTitle}
+            sideContent={sideNoteContent}
+            snippets={sideNoteSnippets}
+            onChangeLinkedNoteId={handleChangeSideLinkedNote}
+            onChangeTitle={setSideNoteTitle}
+            onChangeContent={setSideNoteContent}
+            onRemoveSnippet={(id) =>
+              setSideNoteSnippets((prev) => prev.filter((item) => item.id !== id))
+            }
+            onJumpToPage={(pNum) => {
+              const clamped = Math.max(1, Math.min(totalPages, pNum));
+              setCurrentPage(clamped);
+              setExportToastMessage(`📑 발췌 출처 P.${clamped} 페이지로 이동했습니다.`);
+              setTimeout(() => setExportToastMessage(null), 1600);
+            }}
+            onCopySnippet={async (snip) => {
+              await copyBlockToClipboard(snip.imageDataUrl, snip.extractedText);
+              setExportToastMessage('📋 발췌 블록이 클립보드에 복사되었습니다!');
+              setTimeout(() => setExportToastMessage(null), 1800);
+            }}
+            onSaveToBoard={handleSaveSideNoteToBoard}
+            onClose={() => setIsSideNoteOpen(false)}
+          />
+        )}
           </>
         )}
       </View>
 
-      {/* 3. 하단 플로팅 프로 툴박스 (편집/필기 주석 모드일 때만 표시) */}
+      {/* 3. 하단 플로팅 프로 툴박스 (편집/필기 주석 모드일 때만 표시, 빈 여백 클릭 통과) */}
       {(!isPdfMode || pdfWorkspaceTab === 'annotate') && (
-      <View style={styles.floatingToolboxContainer}>
+      <View
+        pointerEvents="box-none"
+        style={[
+          styles.floatingToolboxContainer,
+          isSideNoteOpen && { right: 340 },
+        ]}
+      >
         {/* 활성 도구별 보조 컨트롤 팝오버 */}
         {activeTool === 'shape' && (
           <View style={styles.subShapeToolbox}>
@@ -3873,6 +4499,22 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
             </Text>
           </View>
         )}
+        {activeTool === 'snippet' && (
+          <View style={styles.toolGuideBadgeAmber}>
+            <Crop size={13} color="#D97706" />
+            <Text style={styles.toolGuideBadgeAmberText}>
+              ✂️ PDF 블록 발췌/복사: 원하는 영역을 드래그하면 클립보드 복사 · 새 노트로 가져오기 · 기존 노트 추가 가능
+            </Text>
+          </View>
+        )}
+        {isSpacePanning && activeTool !== 'hand' && (
+          <View style={styles.toolGuideBadgeBlue}>
+            <Hand size={13} color="#059669" />
+            <Text style={[styles.toolGuideBadgeBlueText, { color: '#047857' }]}>
+              ✋ Space 임시 손바닥 모드: 드래그하여 화면을 부드럽게 스크롤하세요 (키를 떼면 이전 펜 복귀)
+            </Text>
+          </View>
+        )}
 
         {/* 메인 툴박스 알약 바 */}
         <View style={styles.floatingToolboxPill}>
@@ -3880,7 +4522,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           <TouchableOpacity
             style={[styles.toolBtn, activeTool === 'hand' && styles.toolBtnActiveGreen]}
             onPress={() => setActiveTool('hand')}
-            {...(Platform.OS === 'web' ? ({ onClick: () => setActiveTool('hand') } as any) : {})}
           >
             <Hand size={19} color={activeTool === 'hand' ? '#FFFFFF' : '#1E293B'} />
           </TouchableOpacity>
@@ -3889,7 +4530,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           <TouchableOpacity
             style={[styles.toolBtn, activeTool === 'fountain' && styles.toolBtnActive]}
             onPress={() => setActiveTool('fountain')}
-            {...(Platform.OS === 'web' ? ({ onClick: () => setActiveTool('fountain') } as any) : {})}
           >
             <PenTool size={19} color={activeTool === 'fountain' ? '#FFFFFF' : '#1E293B'} />
           </TouchableOpacity>
@@ -3898,7 +4538,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           <TouchableOpacity
             style={[styles.toolBtn, activeTool === 'highlighter' && styles.toolBtnActiveHighlighter]}
             onPress={() => setActiveTool('highlighter')}
-            {...(Platform.OS === 'web' ? ({ onClick: () => setActiveTool('highlighter') } as any) : {})}
           >
             <Highlighter size={19} color={activeTool === 'highlighter' ? '#FFFFFF' : '#1E293B'} />
           </TouchableOpacity>
@@ -3907,7 +4546,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           <TouchableOpacity
             style={[styles.toolBtn, activeTool === 'eraser' && styles.toolBtnActiveEraser]}
             onPress={() => setActiveTool('eraser')}
-            {...(Platform.OS === 'web' ? ({ onClick: () => setActiveTool('eraser') } as any) : {})}
           >
             <Eraser size={19} color={activeTool === 'eraser' ? '#FFFFFF' : '#1E293B'} />
           </TouchableOpacity>
@@ -3916,7 +4554,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           <TouchableOpacity
             style={[styles.toolBtn, activeTool === 'shape' && styles.toolBtnActive]}
             onPress={() => setActiveTool('shape')}
-            {...(Platform.OS === 'web' ? ({ onClick: () => setActiveTool('shape') } as any) : {})}
           >
             <Square size={19} color={activeTool === 'shape' ? '#FFFFFF' : '#1E293B'} />
           </TouchableOpacity>
@@ -3925,7 +4562,6 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
           <TouchableOpacity
             style={[styles.toolBtn, activeTool === 'text' && styles.toolBtnActive]}
             onPress={() => setActiveTool('text')}
-            {...(Platform.OS === 'web' ? ({ onClick: () => setActiveTool('text') } as any) : {})}
           >
             <Type size={19} color={activeTool === 'text' ? '#FFFFFF' : '#1E293B'} />
           </TouchableOpacity>
@@ -3937,46 +4573,51 @@ export const DocumentWorkspaceModal: React.FC<DocumentWorkspaceModalProps> = ({
               setActiveTool('lasso');
               setSelectedStrokeIds([]);
               setSelectionBBox(null);
+              setCapturedBlockRect(null);
+              setCapturedBlockResult(null);
               setExportToastMessage('📦 직사각형 선택: 드래그하여 사각 영역 안의 필기를 선택합니다.');
               setTimeout(() => setExportToastMessage(null), 2500);
             }}
             {...(Platform.OS === 'web'
-              ? ({
-                  title: '직사각형 영역 선택 (드래그하여 객체 선택 및 이동)',
-                  onClick: () => {
-                    setActiveTool('lasso');
-                    setSelectedStrokeIds([]);
-                    setSelectionBBox(null);
-                    setExportToastMessage('📦 직사각형 선택: 드래그하여 사각 영역 안의 필기를 선택합니다.');
-                    setTimeout(() => setExportToastMessage(null), 2500);
-                  },
-                } as any)
+              ? ({ title: '직사각형 영역 선택 (드래그하여 객체 선택 및 이동)' } as any)
               : {})}
           >
             <BoxSelect size={19} color={activeTool === 'lasso' ? '#FFFFFF' : '#1E293B'} />
           </TouchableOpacity>
 
-          {/* 8. 프레젠테이션 레이저 포인터 (발표/강조용: 0.5초 후 자동 소멸) */}
+          {/* 8. Flexcil 스타일 PDF 영역 블록 발췌/복사 & 노트로 가져오기 (Snippet Capture) */}
+          <TouchableOpacity
+            style={[styles.toolBtn, activeTool === 'snippet' && styles.toolBtnActiveSnippet]}
+            onPress={() => {
+              setActiveTool('snippet');
+              setSelectedStrokeIds([]);
+              setSelectionBBox(null);
+              setExportToastMessage(
+                '✂️ 블록 발췌 모드: PDF 영역을 드래그하여 복사하거나 노트로 바로 가져오세요!'
+              );
+              setTimeout(() => setExportToastMessage(null), 2800);
+            }}
+            {...(Platform.OS === 'web'
+              ? ({ title: 'PDF 블록 지정 복사 및 노트로 가져오기 (Flexcil 스타일)' } as any)
+              : {})}
+          >
+            <Crop size={19} color={activeTool === 'snippet' ? '#FFFFFF' : '#D97706'} />
+          </TouchableOpacity>
+
+          {/* 9. 프레젠테이션 레이저 포인터 (발표/강조용: 0.5초 후 자동 소멸) */}
           <TouchableOpacity
             style={[styles.toolBtn, activeTool === 'laser' && styles.toolBtnActiveLaser]}
             onPress={() => {
               setActiveTool('laser');
               setSelectedStrokeIds([]);
               setSelectionBBox(null);
+              setCapturedBlockRect(null);
+              setCapturedBlockResult(null);
               setExportToastMessage('🎯 프레젠테이션 레이저: 발표 중 강조용 도구로, 필기선이 0.5초 후 자동으로 사라집니다.');
               setTimeout(() => setExportToastMessage(null), 3500);
             }}
             {...(Platform.OS === 'web'
-              ? ({
-                  title: '프레젠테이션 레이저 포인터 (발표 중 중요한 부분을 가리키면 0.5초 후 자동 소멸)',
-                  onClick: () => {
-                    setActiveTool('laser');
-                    setSelectedStrokeIds([]);
-                    setSelectionBBox(null);
-                    setExportToastMessage('🎯 프레젠테이션 레이저: 발표 중 강조용 도구로, 필기선이 0.5초 후 자동으로 사라집니다.');
-                    setTimeout(() => setExportToastMessage(null), 3500);
-                  },
-                } as any)
+              ? ({ title: '프레젠테이션 레이저 포인터 (발표 중 중요한 부분을 가리키면 0.5초 후 자동 소멸)' } as any)
               : {})}
           >
             <Presentation size={19} color={activeTool === 'laser' ? '#FFFFFF' : '#EF4444'} />
@@ -6194,6 +6835,206 @@ const styles = StyleSheet.create({
   writingSoundQuickTextActive: {
     color: '#059669',
     fontWeight: '700',
+  },
+  // 분할 사이드 노트 토글 버튼 (상단 바)
+  sideNoteToggleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    ...Platform.select({
+      web: { cursor: 'pointer' },
+    }),
+  },
+  sideNoteToggleBtnActive: {
+    backgroundColor: '#FEF3C7',
+    borderColor: '#F59E0B',
+  },
+  sideNoteToggleText: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    color: '#475569',
+  },
+  sideNoteToggleTextActive: {
+    color: '#B45309',
+  },
+  // Acrobat 바 우측 액션 그룹 & 블록 발췌 퀵 버튼
+  acrobatRightGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  acrobatSnippetQuickBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: '#FFFBEB',
+    borderWidth: 1,
+    borderColor: '#FCD34D',
+    ...Platform.select({
+      web: { cursor: 'pointer' },
+    }),
+  },
+  acrobatSnippetQuickBtnActive: {
+    backgroundColor: '#D97706',
+    borderColor: '#B45309',
+  },
+  acrobatSnippetQuickText: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    color: '#B45309',
+  },
+  acrobatSnippetQuickTextActive: {
+    color: '#FFFFFF',
+  },
+  // 툴박스 블록 발췌 버튼 활성 & 안내 배지
+  toolBtnActiveSnippet: {
+    backgroundColor: '#D97706',
+  },
+  toolGuideBadgeAmber: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#FFFBEB',
+    borderWidth: 1,
+    borderColor: '#FCD34D',
+    borderRadius: 20,
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    marginBottom: 8,
+    ...Platform.select({
+      web: { boxShadow: '0 4px 12px rgba(217, 119, 6, 0.14)' },
+    }),
+  },
+  toolGuideBadgeAmberText: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    color: '#92400E',
+  },
+  // PDF 블록 캡처 확정 오버레이 & 플로팅 액션 바
+  snippetOverlayBox: {
+    position: 'absolute',
+    zIndex: 60,
+  },
+  snippetDashedFrame: {
+    ...StyleSheet.absoluteFillObject,
+    borderWidth: 2,
+    borderStyle: 'dashed',
+    borderColor: '#D97706',
+    backgroundColor: 'rgba(245, 158, 11, 0.10)',
+    borderRadius: 5,
+  },
+  snippetCornerDot: {
+    position: 'absolute',
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 2,
+    borderColor: '#D97706',
+  },
+  snippetActionBar: {
+    position: 'absolute',
+    left: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#0F172A',
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 10,
+    zIndex: 70,
+    ...Platform.select({
+      web: {
+        boxShadow: '0 8px 24px rgba(15, 23, 42, 0.35)',
+        whiteSpace: 'nowrap',
+      },
+    }),
+  },
+  snippetActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 6,
+    ...Platform.select({
+      web: { cursor: 'pointer' },
+    }),
+  },
+  snippetActionBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  snippetCloseBtn: {
+    padding: 5,
+    borderRadius: 6,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    ...Platform.select({
+      web: { cursor: 'pointer' },
+    }),
+  },
+  appendNotePickerCard: {
+    position: 'absolute',
+    left: 0,
+    width: 280,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: '#C4B5FD',
+    padding: 8,
+    zIndex: 80,
+    ...Platform.select({
+      web: { boxShadow: '0 10px 28px rgba(15, 23, 42, 0.25)' },
+    }),
+  },
+  appendNotePickerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingBottom: 6,
+    marginBottom: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  appendNotePickerTitle: {
+    fontSize: 11.5,
+    fontWeight: '800',
+    color: '#4C1D95',
+  },
+  appendNoteItemBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    paddingHorizontal: 8,
+    paddingVertical: 7,
+    borderRadius: 7,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F8FAFC',
+    ...Platform.select({
+      web: { cursor: 'pointer' },
+    }),
+  },
+  appendNoteItemTitle: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#1E293B',
+  },
+  appendNoteItemTag: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#7C3AED',
   },
 });
 

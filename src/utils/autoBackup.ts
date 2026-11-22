@@ -27,42 +27,60 @@ export interface BackupSnapshotMeta {
 }
 
 const MAX_SNAPSHOTS = 5;
+let backupDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
- * 자동 백업 스냅샷 저장
+ * 자동 백업 스냅샷 저장 (900ms 디바운스 + Quota 초과 안전 보호로 UI 버벅임 방지)
  */
-export async function saveAutoBackupSnapshot(payload: Omit<BackupPayload, 'version' | 'timestamp' | 'noteCount'>): Promise<void> {
-  try {
-    const isEnabled = await AsyncStorage.getItem(STORAGE_KEY_AUTOBACKUP_ENABLED);
-    if (isEnabled === 'false') return;
-
-    const fullPayload: BackupPayload = {
-      version: '1.0.0',
-      timestamp: Date.now(),
-      noteCount: payload.notes.length,
-      ...payload,
-    };
-
-    const d = new Date(fullPayload.timestamp);
-    const dateStr = `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
-
-    const newSnapshot: BackupSnapshotMeta = {
-      timestamp: fullPayload.timestamp,
-      dateStr,
-      noteCount: fullPayload.noteCount,
-      data: JSON.stringify(fullPayload),
-    };
-
-    const existingJson = await AsyncStorage.getItem(STORAGE_KEY_AUTOBACKUPS);
-    let list: BackupSnapshotMeta[] = existingJson ? JSON.parse(existingJson) : [];
-
-    // 최신 순으로 추가하고 최대 5개 유지
-    list = [newSnapshot, ...list.slice(0, MAX_SNAPSHOTS - 1)];
-
-    await AsyncStorage.setItem(STORAGE_KEY_AUTOBACKUPS, JSON.stringify(list));
-  } catch (e) {
-    console.warn('Auto backup snapshot error:', e);
+export async function saveAutoBackupSnapshot(
+  payload: Omit<BackupPayload, 'version' | 'timestamp' | 'noteCount'>
+): Promise<void> {
+  if (backupDebounceTimer) {
+    clearTimeout(backupDebounceTimer);
   }
+  backupDebounceTimer = setTimeout(async () => {
+    backupDebounceTimer = null;
+    try {
+      const isEnabled = await AsyncStorage.getItem(STORAGE_KEY_AUTOBACKUP_ENABLED);
+      if (isEnabled === 'false') return;
+
+      const fullPayload: BackupPayload = {
+        version: '1.0.0',
+        timestamp: Date.now(),
+        noteCount: payload.notes.length,
+        ...payload,
+      };
+
+      const d = new Date(fullPayload.timestamp);
+      const dateStr = `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+
+      const newSnapshot: BackupSnapshotMeta = {
+        timestamp: fullPayload.timestamp,
+        dateStr,
+        noteCount: fullPayload.noteCount,
+        data: JSON.stringify(fullPayload),
+      };
+
+      const existingJson = await AsyncStorage.getItem(STORAGE_KEY_AUTOBACKUPS);
+      let list: BackupSnapshotMeta[] = existingJson ? JSON.parse(existingJson) : [];
+
+      // 최신 순으로 추가하고 최대 5개 유지
+      list = [newSnapshot, ...list.slice(0, MAX_SNAPSHOTS - 1)];
+
+      try {
+        await AsyncStorage.setItem(STORAGE_KEY_AUTOBACKUPS, JSON.stringify(list));
+      } catch {
+        // 브라우저 localStorage 용량 한계 시 최근 2개/1개만 유지해 안전하게 저장
+        try {
+          await AsyncStorage.setItem(STORAGE_KEY_AUTOBACKUPS, JSON.stringify(list.slice(0, 2)));
+        } catch {
+          await AsyncStorage.setItem(STORAGE_KEY_AUTOBACKUPS, JSON.stringify(list.slice(0, 1)));
+        }
+      }
+    } catch (e) {
+      console.warn('Auto backup snapshot error:', e);
+    }
+  }, 900);
 }
 
 /**

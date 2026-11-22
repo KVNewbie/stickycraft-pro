@@ -19,7 +19,7 @@ interface PaperTemplatePatternProps {
  * - cornell: 코넬식 단서/본문/요약 3분할 노트 (좌측 28% 레드 마진 라인)
  * - dark: 다크 모드 블랙보드 속지 + 미세 화이트 격자
  */
-export const PaperTemplatePattern: React.FC<PaperTemplatePatternProps> = ({
+export const PaperTemplatePattern: React.FC<PaperTemplatePatternProps> = React.memo(({
   template = 'blank',
   colorHex = '#0F172A',
   lineSpacing = 28,
@@ -159,4 +159,4 @@ export const PaperTemplatePattern: React.FC<PaperTemplatePatternProps> = ({
       </Svg>
     </View>
   );
-};
+});

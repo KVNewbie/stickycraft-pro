@@ -28,8 +28,8 @@ import { NOTE_COLORS, COLOR_KEYS } from '../constants/colors';
 /**
  * ColorNote 스타일 컴팩트 리스트 아이템
  */
-const NoteListItem: React.FC<{ note: Note }> = ({ note }) => {
-  const { openEditNoteEditor, openLockModal, togglePin } = useNoteStore();
+const NoteListItem: React.FC<{ note: Note }> = React.memo(({ note }) => {
+  const { openEditNoteEditor, openLockModal, togglePin } = useNoteStore.getState();
   const colorCfg = NOTE_COLORS[note.color] || NOTE_COLORS.yellow;
   const formattedDate = new Date(note.updatedAt).toLocaleDateString('ko-KR', {
     month: 'short',
@@ -52,7 +52,6 @@ const NoteListItem: React.FC<{ note: Note }> = ({ note }) => {
       style={styles.listItemCard}
       onPress={handlePress}
       activeOpacity={0.7}
-      {...(Platform.OS === 'web' ? ({ onClick: handlePress } as any) : {})}
     >
       {/* Left Color Indicator Bar (ColorNote Signature) */}
       <View style={[styles.listColorBar, { backgroundColor: colorCfg.cardBorder }]} />
@@ -73,14 +72,6 @@ const NoteListItem: React.FC<{ note: Note }> = ({ note }) => {
               togglePin(note.id);
             }}
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            {...(Platform.OS === 'web'
-              ? ({
-                  onClick: (e: any) => {
-                    e.stopPropagation();
-                    togglePin(note.id);
-                  },
-                } as any)
-              : {})}
           >
             <Pin
               size={13}
@@ -136,20 +127,18 @@ const NoteListItem: React.FC<{ note: Note }> = ({ note }) => {
       </View>
     </TouchableOpacity>
   );
-};
+});
 
 export const GridView: React.FC = () => {
   const { width } = useWindowDimensions();
-  const {
-    notes,
-    activeBoardId,
-    filters,
-    openNewNoteEditor,
-    setListLayout,
-    setSelectedColor,
-    setSearchQuery,
-    setSortBy,
-  } = useNoteStore();
+  const notes = useNoteStore((s) => s.notes);
+  const activeBoardId = useNoteStore((s) => s.activeBoardId);
+  const filters = useNoteStore((s) => s.filters);
+  const openNewNoteEditor = useNoteStore((s) => s.openNewNoteEditor);
+  const setListLayout = useNoteStore((s) => s.setListLayout);
+  const setSelectedColor = useNoteStore((s) => s.setSelectedColor);
+  const setSearchQuery = useNoteStore((s) => s.setSearchQuery);
+  const setSortBy = useNoteStore((s) => s.setSortBy);
 
   const isListMode = filters.listLayout === 'list';
 

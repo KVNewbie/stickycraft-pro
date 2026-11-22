@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect, useMemo } from 'react';
+import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
@@ -10,7 +10,7 @@ import {
   Platform,
   GestureResponderEvent,
 } from 'react-native';
-import Svg, { Path as SvgPath } from 'react-native-svg';
+import Svg, { Path as SvgPath, Defs, Pattern, Circle as SvgCircle, Rect as SvgRect } from 'react-native-svg';
 import { StickyCard } from './StickyCard';
 import { useNoteStore } from '../store/useNoteStore';
 import { Note, FreeHandStroke } from '../types/note';
@@ -38,6 +38,37 @@ import { triggerWritingScratch, stopWritingScratch, playWritingSoundPreview } fr
 const CANVAS_WIDTH = 2600;
 const CANVAS_HEIGHT = 2600;
 
+// 초경량 도트 그리드 배경 (기존 2,025개 DOM View → 단일 CSS/SVG 패턴 노드로 최적화)
+const CanvasDotGridBackground = React.memo(() => {
+  if (Platform.OS === 'web') {
+    return (
+      <View
+        pointerEvents="none"
+        style={[
+          StyleSheet.absoluteFillObject,
+          {
+            backgroundImage: 'radial-gradient(circle, rgba(148, 163, 184, 0.42) 1.6px, transparent 1.6px)',
+            backgroundSize: '36px 36px',
+            backgroundPosition: '12px 12px',
+          } as any,
+        ]}
+      />
+    );
+  }
+  return (
+    <View style={StyleSheet.absoluteFillObject} pointerEvents="none">
+      <Svg width={CANVAS_WIDTH} height={CANVAS_HEIGHT}>
+        <Defs>
+          <Pattern id="canvasDotGrid" width="36" height="36" patternUnits="userSpaceOnUse">
+            <SvgCircle cx="18" cy="18" r="1.6" fill="rgba(148, 163, 184, 0.42)" />
+          </Pattern>
+        </Defs>
+        <SvgRect width={CANVAS_WIDTH} height={CANVAS_HEIGHT} fill="url(#canvasDotGrid)" />
+      </Svg>
+    </View>
+  );
+});
+
 interface DraggableStickyProps {
   note: Note;
   zoomLevel: number;
@@ -47,7 +78,7 @@ interface DraggableStickyProps {
   onDuplicate: (id: string) => void;
 }
 
-const DraggableSticky: React.FC<DraggableStickyProps> = ({
+const DraggableSticky: React.FC<DraggableStickyProps> = React.memo(({
   note,
   zoomLevel,
   onDragStart,
@@ -156,7 +187,7 @@ const DraggableSticky: React.FC<DraggableStickyProps> = ({
       <StickyCard note={note} isCanvasItem={true} />
     </View>
   );
-};
+});
 
 // Quadratic Bézier curve & closed polygon smoothing engine
 const strokePointsToPath = (
@@ -258,26 +289,59 @@ const BOARD_PALETTE = [
   { id: 'purple', color: '#8B5CF6' },
 ];
 
+// 확정된 화이트보드 필기 레이어 메모이제이션 (60fps 드로잉 중 불필요한 SVG 경로 재계산 차단)
+const CommittedBoardStrokesLayer = React.memo(({ strokes }: { strokes: FreeHandStroke[] }) => {
+  return (
+    <>
+      {strokes.map((s) => {
+        const d = renderStrokePath(s);
+        if (!d) return null;
+        const isHl = s.tool === 'highlighter';
+        return (
+          <SvgPath
+            key={s.id}
+            d={d}
+            stroke={s.color}
+            strokeWidth={s.width}
+            strokeOpacity={isHl ? 0.4 : 1.0}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            fill="none"
+          />
+        );
+      })}
+    </>
+  );
+});
+
 export const CanvasView: React.FC = () => {
-  const {
-    notes,
-    activeBoardId,
-    filters,
-    updateCanvasPosition,
-    arrangeCanvasNotes,
-    bringToFront,
-    duplicateNote,
-    canvasBoardStrokes,
-    setCanvasBoardStrokes,
-    clearCanvasBoardStrokes,
-    writingSoundEnabled,
-    setWritingSoundEnabled,
-  } = useNoteStore();
+  const notes = useNoteStore((s) => s.notes);
+  const activeBoardId = useNoteStore((s) => s.activeBoardId);
+  const filters = useNoteStore((s) => s.filters);
+  const canvasBoardStrokes = useNoteStore((s) => s.canvasBoardStrokes);
+  const writingSoundEnabled = useNoteStore((s) => s.writingSoundEnabled);
+
+  const updateCanvasPosition = useNoteStore((s) => s.updateCanvasPosition);
+  const arrangeCanvasNotes = useNoteStore((s) => s.arrangeCanvasNotes);
+  const bringToFront = useNoteStore((s) => s.bringToFront);
+  const duplicateNote = useNoteStore((s) => s.duplicateNote);
+  const setCanvasBoardStrokes = useNoteStore((s) => s.setCanvasBoardStrokes);
+  const clearCanvasBoardStrokes = useNoteStore((s) => s.clearCanvasBoardStrokes);
+  const setWritingSoundEnabled = useNoteStore((s) => s.setWritingSoundEnabled);
 
   const [zoomLevel, setZoomLevel] = useState<number>(1);
   const [isDraggingAny, setIsDraggingAny] = useState<boolean>(false);
   const outerScrollRef = useRef<ScrollView>(null);
   const innerScrollRef = useRef<ScrollView>(null);
+
+  const handleNoteDragStart = useCallback(() => setIsDraggingAny(true), []);
+  const handleNoteDragEnd = useCallback(
+    (id: string, x: number, y: number) => {
+      setIsDraggingAny(false);
+      updateCanvasPosition(id, x, y);
+    },
+    [updateCanvasPosition]
+  );
 
   // DrawNote 화이트보드 모드: 'pan' (이동 및 스크롤) vs 'draw' (자유 필기 및 연결선)
   const [canvasMode, setCanvasMode] = useState<'pan' | 'draw'>('pan');
@@ -897,37 +961,13 @@ export const CanvasView: React.FC = () => {
             },
           ]}
         >
-          {/* Subtle Dot Grid Background */}
-          <View style={styles.gridBackgroundLayer} pointerEvents="none">
-            {Array.from({ length: 45 }).map((_, r) => (
-              <View key={`row-${r}`} style={styles.dotRow}>
-                {Array.from({ length: 45 }).map((_, c) => (
-                  <View key={`dot-${r}-${c}`} style={styles.gridDot} />
-                ))}
-              </View>
-            ))}
-          </View>
+          {/* 초경량 단일 노드 도트 그리드 배경 (2,025개 View 제거) */}
+          <CanvasDotGridBackground />
 
-          {/* Whiteboard Board Strokes SVG Layer */}
+          {/* Whiteboard Board Strokes SVG Layer (확정된 획 메모이제이션으로 60fps 유지) */}
           <View style={StyleSheet.absoluteFillObject} pointerEvents="none">
             <Svg width={CANVAS_WIDTH} height={CANVAS_HEIGHT}>
-              {canvasBoardStrokes.map((s) => {
-                const d = renderStrokePath(s);
-                if (!d) return null;
-                const isHl = s.tool === 'highlighter';
-                return (
-                  <SvgPath
-                    key={s.id}
-                    d={d}
-                    stroke={s.color}
-                    strokeWidth={s.width}
-                    strokeOpacity={isHl ? 0.4 : 1.0}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    fill="none"
-                  />
-                );
-              })}
+              <CommittedBoardStrokesLayer strokes={canvasBoardStrokes} />
 
               {/* Active drawing stroke */}
               {currentBoardStroke && (
@@ -968,11 +1008,8 @@ export const CanvasView: React.FC = () => {
               key={note.id}
               note={note}
               zoomLevel={zoomLevel}
-              onDragStart={() => setIsDraggingAny(true)}
-              onDragEnd={(id, x, y) => {
-                setIsDraggingAny(false);
-                updateCanvasPosition(id, x, y);
-              }}
+              onDragStart={handleNoteDragStart}
+              onDragEnd={handleNoteDragEnd}
               onBringToFront={bringToFront}
               onDuplicate={duplicateNote}
             />

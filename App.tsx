@@ -32,28 +32,27 @@ import { StatusBarPinBanner } from './src/components/StatusBarPinBanner';
 import { AlarmAlertModal } from './src/components/AlarmAlertModal';
 
 export default function App() {
-  const {
-    viewMode,
-    isSearchOpen,
-    isLoading,
-    loadInitialData,
-    openCreateNoteSheet,
-    activeEditorType,
-    selectedNoteForDedicatedEditor,
-    closeDedicatedEditor,
-    isReminderModalOpen,
-    reminderTargetNote,
-    closeReminderModal,
-    isTrashModalOpen,
-    trashModalInitialTab,
-    closeTrashModal,
-    activeAlarmNote,
-    snoozeAlarm,
-    dismissAlarm,
-    openEditNoteEditor,
-    openLockModal,
-    checkPendingAlarms,
-  } = useNoteStore();
+  const viewMode = useNoteStore((s) => s.viewMode);
+  const isSearchOpen = useNoteStore((s) => s.isSearchOpen);
+  const isLoading = useNoteStore((s) => s.isLoading);
+  const activeEditorType = useNoteStore((s) => s.activeEditorType);
+  const selectedNoteForDedicatedEditor = useNoteStore((s) => s.selectedNoteForDedicatedEditor);
+  const isReminderModalOpen = useNoteStore((s) => s.isReminderModalOpen);
+  const reminderTargetNote = useNoteStore((s) => s.reminderTargetNote);
+  const isTrashModalOpen = useNoteStore((s) => s.isTrashModalOpen);
+  const trashModalInitialTab = useNoteStore((s) => s.trashModalInitialTab);
+  const activeAlarmNote = useNoteStore((s) => s.activeAlarmNote);
+
+  const loadInitialData = useNoteStore((s) => s.loadInitialData);
+  const openCreateNoteSheet = useNoteStore((s) => s.openCreateNoteSheet);
+  const closeDedicatedEditor = useNoteStore((s) => s.closeDedicatedEditor);
+  const closeReminderModal = useNoteStore((s) => s.closeReminderModal);
+  const closeTrashModal = useNoteStore((s) => s.closeTrashModal);
+  const snoozeAlarm = useNoteStore((s) => s.snoozeAlarm);
+  const dismissAlarm = useNoteStore((s) => s.dismissAlarm);
+  const openEditNoteEditor = useNoteStore((s) => s.openEditNoteEditor);
+  const openLockModal = useNoteStore((s) => s.openLockModal);
+  const checkPendingAlarms = useNoteStore((s) => s.checkPendingAlarms);
 
   const [isBackupModalOpen, setIsBackupModalOpen] = useState(false);
 
