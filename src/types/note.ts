@@ -143,6 +143,50 @@ export type LunarDisplayMode = 'none' | 'all' | 'key_days';
 
 export type PdfViewLayout = 'single' | 'continuous' | 'two-up';
 
+/**
+ * PDF 페이지 내 개별 텍스트 조각의 정규화 좌표 (0~1 범위)
+ * 2단 논문·다단 문서에서 선택한 블록 영역(X·Y)에 속한 문단만 정밀하게 발췌하기 위해 사용
+ */
+export interface PdfTextSpan {
+  text: string;
+  /** 페이지 좌측 상단 기준 정규화 X 좌표 (0 ~ 1) */
+  nx: number;
+  /** 페이지 좌측 상단 기준 정규화 Y 좌표 (0 ~ 1) */
+  ny: number;
+  /** 정규화 너비 (0 ~ 1) */
+  nw: number;
+  /** 정규화 높이 (0 ~ 1) */
+  nh: number;
+}
+
+/**
+ * 발췌된 스티커 메모와 원본 PDF 문서·페이지·문단 영역을 양방향으로 연결하는 참조 링크
+ * PDF 파일명이나 페이지 순서를 바꿔도 고유 ID(sourceNoteId/sourceDocUid + sourcePageId)로 원래 문단으로 복귀
+ */
+export interface PdfSourceLink {
+  id?: string;
+  sourceNoteId?: string;
+  sourceDocUid?: string;
+  sourceDocName?: string;
+  sourcePageId: string;
+  fallbackPageNumber: number;
+  /** 페이지 크기 대비 정규화 영역 (0 ~ 1) */
+  normRect: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  /** 캡처 당시 페이지 픽셀 좌표 */
+  cropRect: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  excerptText?: string;
+}
+
 export interface PdfPageData {
   id: string;
   pageNumber: number;
@@ -152,6 +196,9 @@ export interface PdfPageData {
   sourcePdfName?: string;
   renderedImageUri?: string; // 실제 .pdf 원본 렌더링 이미지 또는 이미지→PDF 변환 페이지 Data URL
   aspectRatio?: number; // 페이지 원본 width / height 비율
+  textItems?: PdfTextSpan[]; // 실제 글자 위치(X, Y, W, H) 기반 2단/다단 발췌용 텍스트 스팬 배열
+  sourceDocId?: string; // 원본 PDF 바이너리 캐시 키 (벡터 텍스트 보존 내보내기 및 지연 렌더링용)
+  sourcePageNumber?: number; // 원본 PDF에서의 1-based 페이지 번호
 }
 
 export interface PdfWatermarkConfig {
@@ -250,6 +297,7 @@ export interface Note {
   noteType?: 'text' | 'checklist' | 'canvas' | 'pdf'; // 메모 고유 유형
   pdfUri?: string; // 첨부된 PDF/문서 URI
   pdfName?: string; // 문서 파일명
+  pdfDocUid?: string; // 문서 이름이 바뀌어도 유지되는 PDF 고유 식별자
   pdfPages?: PdfPageData[]; // PDF 개별 페이지 데이터 (원본 렌더링/편집/병합/분할 지원)
   pdfWatermark?: PdfWatermarkConfig; // 대각선 워터마크 설정
   pdfHeaderFooter?: PdfHeaderFooterConfig; // 머리글·바닥글·페이지 번호 설정
@@ -257,6 +305,8 @@ export interface Note {
   pdfRedactions?: PdfRedactionRect[]; // 민감정보 먹칠/가림 영역
   pdfComments?: PdfCommentThread[]; // 위치 기반 스레드 댓글
   pdfMeta?: PdfDocumentMeta; // 문서 속성(저자/주제/키워드)
+  pdfSourceLink?: PdfSourceLink; // 이 스티커 메모가 발췌된 원본 PDF·페이지·문단 참조 링크
+  pdfSourceLinks?: PdfSourceLink[]; // 기존 메모에 여러 발췌 블록을 추가했을 때의 참조 링크 목록
   textBoxes?: FreeTextBox[]; // PDF 및 캔버스 자유 텍스트 상자
   bookmarkedPages?: number[]; // Jnotes, Notewise, Goodnotes 스타일 즐겨찾기/책갈피 페이지 번호 목록
   pageTemplates?: Record<number, PaperTemplate>; // 페이지별 개별 속지 템플릿 (줄노트, 모눈, 코넬 등)

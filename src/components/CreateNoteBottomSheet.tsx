@@ -5,16 +5,12 @@ import {
   StyleSheet,
   Modal,
   TouchableOpacity,
-  TouchableWithoutFeedback,
-  Dimensions,
   Platform,
 } from 'react-native';
 import {
-  FileText,
   CheckSquare,
   Palette,
   BookOpen,
-  Mic,
   X,
   Sparkles,
   ChevronRight,
@@ -25,7 +21,6 @@ export const CreateNoteBottomSheet: React.FC = () => {
   const {
     isCreateNoteSheetOpen,
     closeCreateNoteSheet,
-    openColorNoteTextEditor,
     openColorNoteChecklistEditor,
     openCanvasWorkspace,
     openPdfWorkspace,
@@ -33,72 +28,41 @@ export const CreateNoteBottomSheet: React.FC = () => {
 
   if (!isCreateNoteSheetOpen) return null;
 
-  const handleSelect = (type: 'text' | 'checklist' | 'canvas' | 'pdf' | 'voice') => {
+  const handleSelect = (type: 'checklist' | 'canvas' | 'pdf') => {
     closeCreateNoteSheet();
-    if (type === 'text') {
-      openColorNoteTextEditor(null);
-    } else if (type === 'checklist') {
+    if (type === 'checklist') {
       openColorNoteChecklistEditor(null);
     } else if (type === 'canvas') {
       openCanvasWorkspace(null);
     } else if (type === 'pdf') {
       openPdfWorkspace(null);
-    } else if (type === 'voice') {
-      // 음성 메모는 텍스트 에디터 진입과 동시에 녹음 스튜디오를 즉시 가동
-      openColorNoteTextEditor(null, true);
     }
   };
 
   const ITEMS = [
     {
-      id: 'text',
-      title: '텍스트 메모',
-      badge: 'ColorNote 스타일',
-      badgeColor: '#2563EB',
-      desc: '깔끔한 줄노트 감성으로 빠르게 생각을 기록하세요.',
-      icon: FileText,
-      iconColor: '#2563EB',
-      bgColor: '#EFF6FF',
-    },
-    {
       id: 'checklist',
-      title: '체크리스트 할 일',
-      badge: 'ColorNote 스타일',
-      badgeColor: '#059669',
-      desc: '할 일 관리, 완료 항목 취소선, 자동 하단 정렬 지원',
+      title: '체크리스트 만들기',
+      desc: '할 일을 적고 완료한 항목을 체크합니다.',
       icon: CheckSquare,
       iconColor: '#059669',
       bgColor: '#ECFDF5',
     },
     {
       id: 'canvas',
-      title: '자유 손글씨 & 캔버스',
-      badge: 'DrawNote & Notewise',
-      badgeColor: '#7C3AED',
-      desc: '만년필 손글씨, 스마트 도형 보정, 페이퍼 속지 템플릿',
+      title: '손글씨 노트 쓰기',
+      desc: '빈 페이지나 줄·격자 속지에 필기합니다.',
       icon: Palette,
       iconColor: '#7C3AED',
       bgColor: '#F5F3FF',
     },
     {
       id: 'pdf',
-      title: 'PDF 문서 열기 · 병합 · 분할',
-      badge: 'Adobe Acrobat 스타일',
-      badgeColor: '#E11D48',
-      desc: '로컬 PDF 파일 열기, 필기 주석, 페이지 구성, PDF 병합(Merge) · 분할(Split)',
+      title: 'PDF에 필기하기',
+      desc: '문서를 열어 필기하고 필요한 부분을 발췌합니다.',
       icon: BookOpen,
       iconColor: '#E11D48',
       bgColor: '#FFF1F2',
-    },
-    {
-      id: 'voice',
-      title: '빠른 음성 녹음 메모',
-      badge: 'Notewise 스타일',
-      badgeColor: '#D97706',
-      desc: '실시간 파형 녹음과 타임스탬프가 연동된 음성 메모',
-      icon: Mic,
-      iconColor: '#D97706',
-      bgColor: '#FFFBEB',
     },
   ] as const;
 
@@ -142,7 +106,8 @@ export const CreateNoteBottomSheet: React.FC = () => {
                     <TouchableOpacity
                       key={item.id}
                       style={styles.actionCard}
-                      onPress={() => handleSelect(item.id as any)}
+                      onPress={() => handleSelect(item.id)}
+                      accessibilityRole="button"
                       activeOpacity={0.7}
                     >
                       <View style={[styles.iconBox, { backgroundColor: item.bgColor }]}>
@@ -152,16 +117,6 @@ export const CreateNoteBottomSheet: React.FC = () => {
                       <View style={styles.actionContent}>
                         <View style={styles.actionTitleRow}>
                           <Text style={styles.actionTitle}>{item.title}</Text>
-                          <View
-                            style={[
-                              styles.badge,
-                              { backgroundColor: item.badgeColor + '14' },
-                            ]}
-                          >
-                            <Text style={[styles.badgeText, { color: item.badgeColor }]}>
-                              {item.badge}
-                            </Text>
-                          </View>
                         </View>
                         <Text style={styles.actionDesc}>{item.desc}</Text>
                       </View>
@@ -267,15 +222,6 @@ const styles = StyleSheet.create({
     fontSize: 14.5,
     fontWeight: '700',
     color: '#0F172A',
-  },
-  badge: {
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  badgeText: {
-    fontSize: 10,
-    fontWeight: '700',
   },
   actionDesc: {
     fontSize: 11.5,

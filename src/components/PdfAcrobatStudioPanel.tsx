@@ -33,24 +33,62 @@ import {
   CheckSquare,
   Square,
 } from 'lucide-react-native';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
 import { Note, PdfDocumentMeta, PdfPageData, PaperTemplate } from '../types/note';
 import { SAMPLE_DOCUMENTS } from '../constants/sampleDocuments';
-import { createPdfPagesFromImages, renderRealPdfFile } from '../utils/pdfEngine';
+import {
+  base64ToUint8Array,
+  createPdfPagesFromImages,
+  PdfInputSource,
+  renderRealPdfFile,
+} from '../utils/pdfEngine';
 
 export type PdfWorkspaceTab = 'annotate' | 'organize' | 'merge' | 'split';
 
 /**
- * 업로드된 실제 .pdf 파일을 오프라인 PDF.js 엔진으로 고화질 렌더링 + 읽기 순서 텍스트 추출 + 메타데이터 파싱하여
- * PdfPageData 배열로 변환합니다. (PDF.js 실패 시 경량 바이트 파서 자동 폴백)
+ * 모바일(iOS / Android) 기기 파일 선택기에서 하나 또는 여러 개의 .pdf 파일을 선택해 바이너리로 읽어옵니다.
+ */
+export async function pickNativePdfFiles(
+  multiple = false
+): Promise<Array<{ name: string; bytes: Uint8Array }>> {
+  try {
+    const res = await DocumentPicker.getDocumentAsync({
+      type: 'application/pdf',
+      multiple,
+      copyToCacheDirectory: true,
+    });
+    if (res.canceled || !res.assets || res.assets.length === 0) return [];
+    const results: Array<{ name: string; bytes: Uint8Array }> = [];
+    for (const asset of res.assets) {
+      const base64 = await FileSystem.readAsStringAsync(asset.uri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      results.push({
+        name: asset.name || '모바일_문서.pdf',
+        bytes: base64ToUint8Array(base64),
+      });
+    }
+    return results;
+  } catch (err) {
+    console.warn('Native PDF picker error:', err);
+    return [];
+  }
+}
+
+/**
+ * 업로드된 실제 .pdf 파일(웹 File 또는 모바일 바이너리)을 오프라인 PDF.js / pdf-lib 엔진으로
+ * 고화질 렌더링 + 읽기 순서 및 2D 좌표 텍스트 추출 + 메타데이터 파싱하여 PdfPageData 배열로 변환합니다.
  */
 export async function parseUploadedPdfFile(
-  file: File,
+  file: PdfInputSource,
   onProgress?: (current: number, total: number) => void
 ): Promise<{
   fileName: string;
   pages: PdfPageData[];
   meta: PdfDocumentMeta;
   usedRealRenderer: boolean;
+  sourceDocId: string;
 }> {
   const fileName = file.name || '업로드_문서.pdf';
   const rendered = await renderRealPdfFile(file, onProgress);
@@ -59,6 +97,7 @@ export async function parseUploadedPdfFile(
     pages: rendered.pages,
     meta: rendered.meta,
     usedRealRenderer: rendered.usedRealRenderer,
+    sourceDocId: rendered.sourceDocId,
   };
 }
 
@@ -69,7 +108,7 @@ export function extractPdfPagesFromNote(note: Note): PdfPageData[] {
   if (note.pdfPages && note.pdfPages.length > 0) {
     return note.pdfPages.map((p, idx) => ({
       ...p,
-      id: `pdfp_${Date.now()}_${idx + 1}_${Math.random().toString(36).substring(2, 6)}`,
+      id: p.id || `pdfp_${Date.now()}_${idx + 1}_${Math.random().toString(36).substring(2, 6)}`,
       pageNumber: idx + 1,
       sourcePdfName: p.sourcePdfName || note.pdfName || note.title,
     }));
@@ -144,7 +183,7 @@ export const PdfOpenLauncherView: React.FC<PdfOpenLauncherProps> = ({
   const [isLoadingFile, setIsLoadingFile] = useState(false);
   const [loadingProgressText, setLoadingProgressText] = useState('');
 
-  const handleTriggerFileUpload = () => {
+  const handleTriggerFileUpload = async () => {
     if (Platform.OS === 'web' && typeof document !== 'undefined') {
       const input = document.createElement('input');
       input.type = 'file';
@@ -180,8 +219,36 @@ export const PdfOpenLauncherView: React.FC<PdfOpenLauncherProps> = ({
         }
       };
       input.click();
-    } else {
-      onCreateBlankPdf(newPdfTitle, newPdfPagesCount, newPdfTemplate, selectedActionTab);
+      return;
+    }
+
+    // 모바일(iOS / Android): 기기 파일 선택기로 실제 .pdf 파일을 열어 원본 보존 및 로드
+    setIsLoadingFile(true);
+    setLoadingProgressText('기기에서 PDF 파일을 불러오는 중...');
+    try {
+      const picked = await pickNativePdfFiles(selectedActionTab === 'merge');
+      if (picked.length === 0) return;
+      let combinedPages: PdfPageData[] = [];
+      let primaryName = picked[0].name;
+      let primaryMeta: PdfDocumentMeta | undefined;
+      for (let i = 0; i < picked.length; i++) {
+        const parsed = await parseUploadedPdfFile(picked[i], (cur, tot) => {
+          setLoadingProgressText(`PDF 분석 중... (${cur}/${tot})`);
+        });
+        if (i === 0) primaryMeta = parsed.meta;
+        combinedPages = [...combinedPages, ...parsed.pages];
+      }
+      const reindexed = combinedPages.map((p, idx) => ({
+        ...p,
+        pageNumber: idx + 1,
+      }));
+      if (picked.length > 1) {
+        primaryName = `${picked[0].name.replace(/\.pdf$/i, '')}_외_${picked.length - 1}건_병합.pdf`;
+      }
+      onOpenUploadedPdf(primaryName, reindexed, selectedActionTab, primaryMeta);
+    } finally {
+      setIsLoadingFile(false);
+      setLoadingProgressText('');
     }
   };
 
@@ -629,7 +696,7 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
   };
 
   // 외부 로컬 .pdf 파일을 트레이로 불러와 원하는 페이지만 골라 넣기
-  const handleLoadExternalPdfIntoTray = () => {
+  const handleLoadExternalPdfIntoTray = async () => {
     if (Platform.OS === 'web' && typeof document !== 'undefined') {
       const input = document.createElement('input');
       input.type = 'file';
@@ -651,6 +718,22 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
         }
       };
       input.click();
+      return;
+    }
+
+    setIsMergeLoading(true);
+    try {
+      const picked = await pickNativePdfFiles(false);
+      if (picked.length === 0) return;
+      const parsed = await parseUploadedPdfFile(picked[0]);
+      setUploadedExternalDoc({
+        title: parsed.fileName,
+        pages: parsed.pages,
+      });
+      setExternalSourceNoteId('__uploaded__');
+      setExternalSelectedPages(parsed.pages.map((_, idx) => idx + 1));
+    } finally {
+      setIsMergeLoading(false);
     }
   };
 
@@ -722,7 +805,7 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
     }
   };
 
-  const handleUploadPdfToMerge = () => {
+  const handleUploadPdfToMerge = async () => {
     if (Platform.OS === 'web' && typeof document !== 'undefined') {
       const input = document.createElement('input');
       input.type = 'file';
@@ -746,6 +829,23 @@ export const PdfAcrobatStudioPanel: React.FC<PdfAcrobatStudioPanelProps> = ({
         }
       };
       input.click();
+      return;
+    }
+
+    setIsMergeLoading(true);
+    try {
+      const picked = await pickNativePdfFiles(true);
+      if (picked.length === 0) return;
+      let incoming: PdfPageData[] = [];
+      for (const item of picked) {
+        const parsed = await parseUploadedPdfFile(item);
+        incoming = [...incoming, ...parsed.pages];
+      }
+      if (incoming.length > 0) {
+        onMergePages(incoming, null, mergePosition);
+      }
+    } finally {
+      setIsMergeLoading(false);
     }
   };
 

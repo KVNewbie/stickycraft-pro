@@ -156,14 +156,32 @@ export const GridView: React.FC = () => {
       if (activeBoardId !== 'all' && note.boardId !== activeBoardId) {
         return false;
       }
-      // 검색어 필터 (제목, 본문, 체크리스트, 태그)
+      // 검색어 필터 (제목, 본문, 체크리스트, 태그, PDF 모든 페이지 본문, 텍스트 상자, 댓글)
       if (filters.searchQuery.trim()) {
         const q = filters.searchQuery.toLowerCase();
         const inTitle = (note.title || '').toLowerCase().includes(q);
-        const inContent = (note.content || '').toLowerCase().includes(q);
         const inTags = (note.tags || []).some((t) => t.toLowerCase().includes(q));
-        const inCheck = (note.checklist || []).some((c) => c.text.toLowerCase().includes(q));
-        if (!inTitle && !inContent && !inTags && !inCheck) return false;
+        if (note.isLocked) {
+          if (!inTitle && !inTags) return false;
+        } else {
+          const inContent = (note.content || '').toLowerCase().includes(q);
+          const inCheck = (note.checklist || []).some((c) => c.text.toLowerCase().includes(q));
+          const inPdfPages = (note.pdfPages || []).some(
+            (p) =>
+              (p.title || '').toLowerCase().includes(q) ||
+              (p.subtitle || '').toLowerCase().includes(q) ||
+              (p.content || '').toLowerCase().includes(q)
+          );
+          const inTextBoxes = (note.textBoxes || []).some((tb) =>
+            (tb.text || '').toLowerCase().includes(q)
+          );
+          const inComments = (note.pdfComments || []).some((c) =>
+            (c.messages || []).some((m) => (m.text || '').toLowerCase().includes(q))
+          );
+          if (!inTitle && !inContent && !inTags && !inCheck && !inPdfPages && !inTextBoxes && !inComments) {
+            return false;
+          }
+        }
       }
       // 태그 필터
       if (filters.selectedTag && (!note.tags || !note.tags.includes(filters.selectedTag))) {

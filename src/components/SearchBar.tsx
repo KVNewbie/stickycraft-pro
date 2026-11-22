@@ -25,6 +25,7 @@ import {
 import { useNoteStore } from '../store/useNoteStore';
 import { NOTE_COLORS, COLOR_KEYS } from '../constants/colors';
 import { NoteColorId, SortOption, Note } from '../types/note';
+import { getSampleDocumentForNote } from '../constants/sampleDocuments';
 
 const SORT_OPTIONS: { id: SortOption; label: string }[] = [
   { id: 'updated', label: '최근 수정순' },
@@ -33,6 +34,23 @@ const SORT_OPTIONS: { id: SortOption; label: string }[] = [
   { id: 'color', label: 'ColorNote 색상순' },
   { id: 'reminder', label: '알람/리마인더순' },
 ];
+
+interface IndexedSearchMatch {
+  key: string;
+  note: Note;
+  field: 'title' | 'content' | 'checklist' | 'tag' | 'audio' | 'pdf_page' | 'textbox' | 'comment';
+  snippet: string;
+  pageNumber?: number;
+}
+
+function buildSentenceSnippet(text: string, q: string): string {
+  const clean = (text || '').replace(/\s+/g, ' ').trim();
+  const idx = clean.toLowerCase().indexOf(q);
+  if (idx < 0) return clean.slice(0, 64);
+  const start = Math.max(0, idx - 18);
+  const end = Math.min(clean.length, idx + q.length + 38);
+  return (start > 0 ? '...' : '') + clean.slice(start, end) + (end < clean.length ? '...' : '');
+}
 
 export const SearchBar: React.FC = () => {
   const {
@@ -48,6 +66,8 @@ export const SearchBar: React.FC = () => {
     resetFilters,
     openEditNoteEditor,
     openLockModal,
+    openPdfNoteAtPage,
+    openPdfSourceLink,
   } = useNoteStore();
 
   // 모든 메모에서 사용된 태그 고유 목록 추출
@@ -57,55 +77,146 @@ export const SearchBar: React.FC = () => {
     return Array.from(set);
   }, [notes]);
 
-  // 통합 검색 인덱스 매칭 목록
+  // 통합 검색 인덱스 매칭 목록 (메모 본문 · 체크 항목 · PDF 페이지별 원문 · 발췌 · 필기 텍스트 상자 통합)
   const indexedMatches = useMemo(() => {
     const q = filters.searchQuery.trim().toLowerCase();
     if (!q) return [];
 
-    return notes
-      .filter((n) => !n.isDeleted)
-      .map((note) => {
-        let field: 'title' | 'content' | 'checklist' | 'tag' | 'audio' | null = null;
-        let snippet = '';
+    const results: IndexedSearchMatch[] = [];
 
-        if (note.isLocked) {
-          if (note.title && note.title.toLowerCase().includes(q)) {
-            field = 'title';
-            snippet = '🔒 비밀번호로 보호된 메모';
-          } else if (note.tags && note.tags.some((t) => t.toLowerCase().includes(q))) {
-            field = 'tag';
-            snippet = `🔒 잠긴 메모 • 태그: #${note.tags.join(' #')}`;
-          }
-          if (!field) return null;
-          return { note, field, snippet };
-        }
+    for (const note of notes) {
+      if (note.isDeleted) continue;
 
+      if (note.isLocked) {
         if (note.title && note.title.toLowerCase().includes(q)) {
-          field = 'title';
-          snippet = note.title;
-        } else if (note.content && note.content.toLowerCase().includes(q)) {
-          field = 'content';
-          const idx = note.content.toLowerCase().indexOf(q);
-          const start = Math.max(0, idx - 15);
-          const end = Math.min(note.content.length, idx + q.length + 30);
-          snippet = (start > 0 ? '...' : '') + note.content.substring(start, end) + (end < note.content.length ? '...' : '');
-        } else if (note.checklist && note.checklist.some((c) => c.text.toLowerCase().includes(q))) {
-          field = 'checklist';
-          const matchItem = note.checklist.find((c) => c.text.toLowerCase().includes(q));
-          snippet = `할 일: ${matchItem?.text || ''}`;
+          results.push({
+            key: `${note.id}_locked_title`,
+            note,
+            field: 'title',
+            snippet: '🔒 비밀번호로 보호된 메모',
+          });
         } else if (note.tags && note.tags.some((t) => t.toLowerCase().includes(q))) {
-          field = 'tag';
-          snippet = `태그: #${note.tags.join(' #')}`;
-        } else if (note.audioNotes && note.audioNotes.some((a) => (a.title || '').toLowerCase().includes(q))) {
-          field = 'audio';
-          const matchA = note.audioNotes.find((a) => (a.title || '').toLowerCase().includes(q));
-          snippet = `음성 녹음: ${matchA?.title || ''}`;
+          results.push({
+            key: `${note.id}_locked_tag`,
+            note,
+            field: 'tag',
+            snippet: `🔒 잠긴 메모 • 태그: #${note.tags.join(' #')}`,
+          });
         }
+        continue;
+      }
 
-        if (!field) return null;
-        return { note, field, snippet };
-      })
-      .filter(Boolean) as { note: Note; field: string; snippet: string }[];
+      // 1. PDF 문서 페이지별 본문 검색 (문서명 · 쪽수 · 일치 문장)
+      const isPdf =
+        note.noteType === 'pdf' ||
+        Boolean(note.pdfPages && note.pdfPages.length > 0) ||
+        Boolean(note.pdfName);
+      const pdfPages =
+        note.pdfPages && note.pdfPages.length > 0
+          ? note.pdfPages
+          : isPdf
+          ? getSampleDocumentForNote(note.title, note.pdfName)?.pages || []
+          : [];
+
+      let matchedInPdfPages = false;
+      for (let i = 0; i < pdfPages.length; i++) {
+        const p = pdfPages[i];
+        const pNum = p.pageNumber || i + 1;
+        const pageFullText = [p.title, p.subtitle || '', p.content || ''].join(' ');
+        if (pageFullText.toLowerCase().includes(q)) {
+          matchedInPdfPages = true;
+          results.push({
+            key: `${note.id}_pdfp_${pNum}`,
+            note,
+            field: 'pdf_page',
+            pageNumber: pNum,
+            snippet: `P.${pNum}쪽 • ${buildSentenceSnippet(pageFullText, q)}`,
+          });
+        }
+      }
+
+      // 2. PDF / 캔버스 자유 텍스트 상자(필기 텍스트) 검색
+      if (note.textBoxes && note.textBoxes.length > 0) {
+        for (const tb of note.textBoxes) {
+          if (tb.text && tb.text.toLowerCase().includes(q)) {
+            const pNum = tb.pageIndex || 1;
+            results.push({
+              key: `${note.id}_tb_${tb.id}`,
+              note,
+              field: 'textbox',
+              pageNumber: pNum,
+              snippet: `P.${pNum}쪽 필기 텍스트 • ${buildSentenceSnippet(tb.text, q)}`,
+            });
+          }
+        }
+      }
+
+      // 3. 스레드 댓글 검색
+      if (note.pdfComments && note.pdfComments.length > 0) {
+        for (const c of note.pdfComments) {
+          const hitMsg = (c.messages || []).find((m) => (m.text || '').toLowerCase().includes(q));
+          if (hitMsg) {
+            results.push({
+              key: `${note.id}_cmnt_${c.id}`,
+              note,
+              field: 'comment',
+              pageNumber: c.pageIndex || 1,
+              snippet: `P.${c.pageIndex || 1}쪽 댓글 • ${buildSentenceSnippet(hitMsg.text, q)}`,
+            });
+          }
+        }
+      }
+
+      if (matchedInPdfPages) continue;
+
+      // 4. 일반 메모 / 발췌 스티커 / 체크리스트 검색
+      if (note.content && note.content.toLowerCase().includes(q)) {
+        const srcLink = note.pdfSourceLink;
+        const prefix = srcLink
+          ? `[발췌 원문 P.${srcLink.fallbackPageNumber}쪽] `
+          : '';
+        results.push({
+          key: `${note.id}_content`,
+          note,
+          field: 'content',
+          pageNumber: srcLink?.fallbackPageNumber,
+          snippet: `${prefix}${buildSentenceSnippet(note.content, q)}`,
+        });
+      } else if (note.title && note.title.toLowerCase().includes(q)) {
+        results.push({
+          key: `${note.id}_title`,
+          note,
+          field: 'title',
+          pageNumber: isPdf ? 1 : note.pdfSourceLink?.fallbackPageNumber,
+          snippet: note.title,
+        });
+      } else if (note.checklist && note.checklist.some((c) => c.text.toLowerCase().includes(q))) {
+        const matchItem = note.checklist.find((c) => c.text.toLowerCase().includes(q));
+        results.push({
+          key: `${note.id}_check`,
+          note,
+          field: 'checklist',
+          snippet: `할 일: ${matchItem?.text || ''}`,
+        });
+      } else if (note.tags && note.tags.some((t) => t.toLowerCase().includes(q))) {
+        results.push({
+          key: `${note.id}_tag`,
+          note,
+          field: 'tag',
+          snippet: `태그: #${note.tags.join(' #')}`,
+        });
+      } else if (note.audioNotes && note.audioNotes.some((a) => (a.title || '').toLowerCase().includes(q))) {
+        const matchA = note.audioNotes.find((a) => (a.title || '').toLowerCase().includes(q));
+        results.push({
+          key: `${note.id}_audio`,
+          note,
+          field: 'audio',
+          snippet: `음성 녹음: ${matchA?.title || ''}`,
+        });
+      }
+    }
+
+    return results;
   }, [notes, filters.searchQuery]);
 
   const hasActiveFilters =
@@ -117,11 +228,25 @@ export const SearchBar: React.FC = () => {
     filters.onlyChecklist ||
     filters.sortBy !== 'updated';
 
-  const handleOpenNote = (note: Note) => {
+  const handleOpenSearchResult = (match: IndexedSearchMatch) => {
+    const { note, pageNumber } = match;
+    const isPdf =
+      note.noteType === 'pdf' ||
+      Boolean(note.pdfPages && note.pdfPages.length > 0) ||
+      Boolean(note.pdfName);
+
+    const openTarget = () => {
+      if (isPdf && pageNumber) {
+        openPdfNoteAtPage(note, pageNumber, filters.searchQuery.trim());
+      } else {
+        openEditNoteEditor(note);
+      }
+    };
+
     if (note.isLocked) {
-      openLockModal(note, () => openEditNoteEditor(note));
+      openLockModal(note, openTarget);
     } else {
-      openEditNoteEditor(note);
+      openTarget();
     }
   };
 
@@ -132,7 +257,7 @@ export const SearchBar: React.FC = () => {
         <Search size={16} color="#94A3B8" />
         <TextInput
           style={styles.input}
-          placeholder="메모 제목, 내용, 태그, 체크리스트 통합 검색..."
+          placeholder="메모 본문, 체크리스트, PDF 원문(페이지별), 발췌 통합 검색..."
           placeholderTextColor="#94A3B8"
           value={filters.searchQuery}
           onChangeText={setSearchQuery}
@@ -144,14 +269,14 @@ export const SearchBar: React.FC = () => {
         )}
       </View>
 
-      {/* 실시간 통합 검색 인덱스 팝업/서머리 */}
+      {/* 실시간 통합 검색 인덱스 팝업/서머리 (문서명 · 쪽수 · 일치 문장 표시) */}
       {filters.searchQuery.trim().length > 0 && (
         <View style={styles.indexBox}>
           <View style={styles.indexHeader}>
             <View style={styles.indexTitleRow}>
               <Sparkles size={13} color="#2563EB" />
               <Text style={styles.indexTitle}>
-                통합 검색 인덱스: "{filters.searchQuery}" ({indexedMatches.length}건 일치)
+                통합 검색 결과: "{filters.searchQuery}" ({indexedMatches.length}건 일치)
               </Text>
             </View>
           </View>
@@ -162,13 +287,14 @@ export const SearchBar: React.FC = () => {
               nestedScrollEnabled
               showsVerticalScrollIndicator={false}
             >
-              {indexedMatches.slice(0, 4).map(({ note, field, snippet }) => {
+              {indexedMatches.slice(0, 8).map((match) => {
+                const { key, note, snippet, pageNumber } = match;
                 const colorCfg = NOTE_COLORS[note.color] || NOTE_COLORS.yellow;
                 return (
                   <TouchableOpacity
-                    key={note.id}
+                    key={key}
                     style={styles.indexResultItem}
-                    onPress={() => handleOpenNote(note)}
+                    onPress={() => handleOpenSearchResult(match)}
                     activeOpacity={0.7}
                   >
                     <View
@@ -178,20 +304,58 @@ export const SearchBar: React.FC = () => {
                       ]}
                     />
                     <View style={styles.indexItemTextWrap}>
-                      <Text style={styles.indexItemTitle} numberOfLines={1}>
-                        {note.title || '제목 없음'}
-                      </Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <Text style={styles.indexItemTitle} numberOfLines={1}>
+                          {note.title || note.pdfName || '제목 없음'}
+                        </Text>
+                        {typeof pageNumber === 'number' && (
+                          <View
+                            style={{
+                              backgroundColor: '#EFF6FF',
+                              borderWidth: 1,
+                              borderColor: '#BFDBFE',
+                              paddingHorizontal: 6,
+                              paddingVertical: 1,
+                              borderRadius: 6,
+                            }}
+                          >
+                            <Text style={{ fontSize: 10.5, fontWeight: '800', color: '#1D4ED8' }}>
+                              P.{pageNumber}쪽
+                            </Text>
+                          </View>
+                        )}
+                      </View>
                       <Text style={styles.indexItemSnippet} numberOfLines={1}>
                         {snippet}
                       </Text>
                     </View>
+                    {note.pdfSourceLink && (
+                      <TouchableOpacity
+                        style={{
+                          backgroundColor: '#EEF2FF',
+                          borderWidth: 1,
+                          borderColor: '#C7D2FE',
+                          paddingHorizontal: 7,
+                          paddingVertical: 3,
+                          borderRadius: 6,
+                        }}
+                        onPress={(e) => {
+                          e.stopPropagation();
+                          if (note.pdfSourceLink) openPdfSourceLink(note.pdfSourceLink);
+                        }}
+                      >
+                        <Text style={{ fontSize: 10.5, fontWeight: '800', color: '#4338CA' }}>
+                          원문 보기
+                        </Text>
+                      </TouchableOpacity>
+                    )}
                     <ChevronRight size={14} color="#94A3B8" />
                   </TouchableOpacity>
                 );
               })}
             </ScrollView>
           ) : (
-            <Text style={styles.indexEmptyText}>일치하는 메모 내용이 없습니다.</Text>
+            <Text style={styles.indexEmptyText}>일치하는 메모 또는 PDF 문단이 없습니다.</Text>
           )}
         </View>
       )}

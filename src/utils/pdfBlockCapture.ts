@@ -7,6 +7,7 @@ import {
   PdfPageData,
   PdfRedactionRect,
   PdfStampItem,
+  PdfTextSpan,
   PdfWatermarkConfig,
 } from '../types/note';
 import { renderCompositePageToCanvas } from './pdfEngine';
@@ -19,12 +20,14 @@ export interface BlockRect {
 }
 
 export interface PdfPageSnapshotMeta {
+  id?: string;
   pageNumber: number;
   totalPages: number;
   title: string;
   subtitle?: string;
   content: string;
   docName: string;
+  textItems?: PdfTextSpan[];
 }
 
 export interface CapturedBlockResult {
@@ -34,6 +37,14 @@ export interface CapturedBlockResult {
   height: number;
   pageNumber: number;
   docName: string;
+  sourcePageId?: string;
+  cropRect: BlockRect;
+  normRect: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
 }
 
 /**
@@ -80,9 +91,156 @@ function bandHitsRedaction(
 }
 
 /**
+ * 2D 글자 위치 스팬(PdfTextSpan[])에서 선택 영역(cropX~cropRight, cropY~cropBottom)에 포함되는
+ * 텍스트만 추출합니다. (2단 논문·다단 문서에서 선택한 단의 문단만 정밀하게 발췌)
+ */
+function extractFrom2dTextSpans(
+  spans: PdfTextSpan[],
+  cropX: number,
+  cropY: number,
+  cropRight: number,
+  cropBottom: number,
+  pageWidth: number,
+  pageHeight: number,
+  redactions: PdfRedactionRect[]
+): string[] {
+  const matched: Array<PdfTextSpan & { px: number; py: number; pw: number; ph: number }> = [];
+  for (const sp of spans) {
+    if (!sp.text || !sp.text.trim()) continue;
+    const px = sp.nx * pageWidth;
+    const py = sp.ny * pageHeight;
+    const pw = Math.max(4, sp.nw * pageWidth);
+    const ph = Math.max(8, sp.nh * pageHeight);
+    const pRight = px + pw;
+    const pBottom = py + ph;
+
+    const hOverlap = Math.min(pRight, cropRight) - Math.max(px, cropX);
+    const vOverlap = Math.min(pBottom, cropBottom) - Math.max(py, cropY);
+    const centerX = px + pw / 2;
+    const centerY = py + ph / 2;
+    const hitsX = (centerX >= cropX && centerX <= cropRight) || hOverlap >= Math.min(10, pw * 0.35);
+    const hitsY = (centerY >= cropY && centerY <= cropBottom) || vOverlap >= Math.min(6, ph * 0.35);
+
+    if (hitsX && hitsY && !bandHitsRedaction(redactions, py, pBottom, px, pRight)) {
+      matched.push({ ...sp, px, py, pw, ph });
+    }
+  }
+
+  if (matched.length === 0) return [];
+
+  // Y 좌표(줄) 기준으로 정렬 후 같은 줄 내에서 X 좌표 순으로 조합
+  matched.sort((a, b) => (Math.abs(a.py - b.py) <= 8 ? a.px - b.px : a.py - b.py));
+  const lines: string[] = [];
+  let curLine: typeof matched = [];
+  let lastY: number | null = null;
+
+  const flushLine = () => {
+    if (curLine.length === 0) return;
+    curLine.sort((a, b) => a.px - b.px);
+    const joined = curLine.map((s) => s.text.trim()).filter(Boolean).join(' ');
+    if (joined) lines.push(joined);
+    curLine = [];
+  };
+
+  for (const item of matched) {
+    if (lastY !== null && Math.abs(item.py - lastY) > 10) {
+      flushLine();
+    }
+    curLine.push(item);
+    lastY = item.py;
+  }
+  flushLine();
+  return lines;
+}
+
+/**
+ * 한 줄의 텍스트에서 수평 선택 범위(cropX ~ cropRight)에 해당하는 단(column) 또는 단어 구간만 추출합니다.
+ * - 2칸 이상 공백/탭/파이프로 구분된 2단·다단 줄은 각 단의 수평 위치[colLeft, colRight]를 계산하여 선택된 단만 발췌
+ * - 단일 줄에서도 좌/우 일부 영역만 드래그한 경우 해당 X 구간에 놓인 단어들만 정밀 발췌
+ */
+function extractHorizontalSliceFromLine(
+  line: string,
+  lineLeft: number,
+  lineMaxW: number,
+  lineTop: number,
+  lineBot: number,
+  cropX: number,
+  cropRight: number,
+  redactions: PdfRedactionRect[]
+): string {
+  const trimmed = (line || '').trim();
+  if (!trimmed) return '';
+  const lineRight = lineLeft + lineMaxW;
+  if (cropRight <= lineLeft || cropX >= lineRight) return '';
+
+  // 1. 탭(\t), 파이프(|), 또는 2칸 이상 연속 공백으로 구분된 2단/다단 텍스트 감지
+  const colSegments = line
+    .split(/\t+|\s{2,}|\s+\|\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (colSegments.length >= 2) {
+    const colW = lineMaxW / colSegments.length;
+    const selectedCols: string[] = [];
+    colSegments.forEach((seg, idx) => {
+      const colLeft = lineLeft + idx * colW;
+      const colRight = colLeft + colW;
+      const colCenter = (colLeft + colRight) / 2;
+      const overlap = Math.min(colRight, cropRight) - Math.max(colLeft, cropX);
+      const hitsCol =
+        (colCenter >= cropX && colCenter <= cropRight) || overlap >= Math.min(24, colW * 0.3);
+      if (hitsCol && !bandHitsRedaction(redactions, lineTop, lineBot, colLeft, colRight)) {
+        selectedCols.push(seg);
+      }
+    });
+    return selectedCols.join(' ').trim();
+  }
+
+  // 2. 전체 폭의 75% 이상을 감싸는 드래그라면 줄 전체 반환
+  const coversMostWidth =
+    cropX <= lineLeft + lineMaxW * 0.16 && cropRight >= lineLeft + lineMaxW * 0.84;
+  if (coversMostWidth) {
+    if (bandHitsRedaction(redactions, lineTop, lineBot, Math.max(lineLeft, cropX), Math.min(lineRight, cropRight))) {
+      return '';
+    }
+    return trimmed;
+  }
+
+  // 3. 줄의 일부 가로 영역(예: 좌측 절반 또는 우측 절반)만 선택한 경우 단어별 X 좌표 비율로 필터링
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  if (words.length <= 1) {
+    const mid = lineLeft + lineMaxW * 0.35;
+    if (cropX <= mid && cropRight >= lineLeft) {
+      return bandHitsRedaction(redactions, lineTop, lineBot, lineLeft, mid) ? '' : trimmed;
+    }
+    return '';
+  }
+
+  const totalChars = Math.max(1, trimmed.length);
+  let cursorChar = 0;
+  const keptWords: string[] = [];
+  for (const w of words) {
+    const startRatio = cursorChar / totalChars;
+    const endRatio = (cursorChar + w.length) / totalChars;
+    cursorChar += w.length + 1;
+    const wLeft = lineLeft + startRatio * lineMaxW;
+    const wRight = lineLeft + endRatio * lineMaxW;
+    const wCenter = (wLeft + wRight) / 2;
+    const wOverlap = Math.min(wRight, cropRight) - Math.max(wLeft, cropX);
+    if (
+      ((wCenter >= cropX && wCenter <= cropRight) || wOverlap >= Math.max(4, (wRight - wLeft) * 0.4)) &&
+      !bandHitsRedaction(redactions, lineTop, lineBot, wLeft, wRight)
+    ) {
+      keptWords.push(w);
+    }
+  }
+  return keptWords.join(' ').trim();
+}
+
+/**
  * PDF 또는 캔버스 페이지의 지정된 직사각형 블록 영역을 2x HiDPI 이미지(Data URL)로 캡처하고,
- * 해당 블록 영역 안에 걸치는 본문/제목/텍스트 상자 텍스트를 정밀하게 발췌합니다.
- * (먹칠 영역에 걸친 텍스트는 발췌 결과에서 자동 제외)
+ * 해당 블록 영역(X·Y 2차원 좌표) 안에 걸치는 본문/제목/텍스트 상자 텍스트를 정밀하게 발췌합니다.
+ * (2단 문서의 왼쪽/오른쪽 문단 분리 발췌 및 먹칠 영역 텍스트 자동 제외 지원)
  */
 export function captureDocumentBlockSnapshot(params: {
   cropRect: BlockRect;
@@ -92,6 +250,8 @@ export function captureDocumentBlockSnapshot(params: {
   isNightMode: boolean;
   paperTemplate: PaperTemplate;
   pdfPage: PdfPageSnapshotMeta | null;
+  pdfPageData?: PdfPageData | null;
+  textItems?: PdfTextSpan[];
   strokes: FreeHandStroke[];
   textBoxes: FreeTextBox[];
   redactions?: PdfRedactionRect[];
@@ -109,7 +269,11 @@ export function captureDocumentBlockSnapshot(params: {
     textBoxes,
   } = params;
   const redactions = params.redactions || [];
-  const hasRenderedImage = Boolean(params.hasRenderedImage);
+  const hasRenderedImage = Boolean(
+    params.hasRenderedImage || params.pdfPageData?.renderedImageUri
+  );
+  const availableTextSpans =
+    params.textItems || params.pdfPageData?.textItems || pdfPage?.textItems;
 
   const cropX = Math.max(0, Math.round(cropRect.x));
   const cropY = Math.max(0, Math.round(cropRect.y));
@@ -119,6 +283,25 @@ export function captureDocumentBlockSnapshot(params: {
   const cropBottom = cropY + cropH;
 
   const extractedLines: string[] = [];
+  const used2dSpans = Boolean(
+    isPdfMode && availableTextSpans && availableTextSpans.length > 0
+  );
+
+  // 1순위: 실제 PDF 글자 위치(2D PdfTextSpan) 기반 발췌 (2단 논문 좌/우 문단 완벽 분리)
+  if (used2dSpans && availableTextSpans) {
+    extractedLines.push(
+      ...extractFrom2dTextSpans(
+        availableTextSpans,
+        cropX,
+        cropY,
+        cropRight,
+        cropBottom,
+        pageWidth,
+        pageHeight,
+        redactions
+      )
+    );
+  }
 
   // 텍스트 상자 중 블록 영역에 포함되는 텍스트 수집 (먹칠된 텍스트 상자 제외)
   const matchedTextBoxLines: string[] = [];
@@ -135,18 +318,30 @@ export function captureDocumentBlockSnapshot(params: {
     }
   }
 
-  // 실제 PDF 렌더링 이미지 페이지: 읽기 순서 텍스트를 페이지 높이에 비례 매핑하여 블록 영역 텍스트 발췌
-  if (isPdfMode && pdfPage && hasRenderedImage) {
+  // 실제 PDF 렌더링 이미지 페이지(2D textItems가 없는 경우): 줄별 Y 및 단(column) X 범위를 함께 검사하여 발췌
+  if (isPdfMode && pdfPage && hasRenderedImage && !used2dSpans) {
     const allLines = (pdfPage.content || '').split('\n').filter((l) => l.trim());
     if (allLines.length > 0) {
+      const padX = Math.round(pageWidth * 0.055);
+      const usableW = Math.max(120, pageWidth - padX * 2);
       const marginTop = pageHeight * 0.06;
-      const usable = Math.max(1, pageHeight - marginTop * 2);
-      const lineH = usable / allLines.length;
+      const usableH = Math.max(1, pageHeight - marginTop * 2);
+      const lineH = usableH / allLines.length;
       allLines.forEach((line, i) => {
         const top = marginTop + i * lineH;
         const bot = top + lineH;
-        if (bot >= cropY && top <= cropBottom && !bandHitsRedaction(redactions, top, bot, 0, pageWidth)) {
-          extractedLines.push(line.trim());
+        if (bot >= cropY && top <= cropBottom) {
+          const sliced = extractHorizontalSliceFromLine(
+            line,
+            padX,
+            usableW,
+            top,
+            bot,
+            cropX,
+            cropRight,
+            redactions
+          );
+          if (sliced) extractedLines.push(sliced);
         }
       });
     }
@@ -223,7 +418,7 @@ export function captureDocumentBlockSnapshot(params: {
           }
         }
 
-        // 2. PDF 문서 본문 렌더링 & 해당 블록 영역 텍스트 정밀 발췌
+        // 2. PDF 문서 본문 렌더링 & 해당 블록 영역(X·Y) 텍스트 정밀 발췌
         if (isPdfMode && pdfPage && !hasRenderedImage) {
           const padX = 40;
           const contentMaxW = Math.max(200, pageWidth - padX * 2);
@@ -249,8 +444,18 @@ export function captureDocumentBlockSnapshot(params: {
             const lineTop = cursorY - 20;
             const lineBot = cursorY + 6;
             ctx.fillText(line, padX, cursorY);
-            if (lineBot >= cropY && lineTop <= cropBottom && cropRight > padX && line.trim() && !bandHitsRedaction(redactions, lineTop, lineBot, padX, pageWidth - padX)) {
-              extractedLines.push(line.trim());
+            if (!used2dSpans && lineBot >= cropY && lineTop <= cropBottom) {
+              const sliced = extractHorizontalSliceFromLine(
+                line,
+                padX,
+                contentMaxW,
+                lineTop,
+                lineBot,
+                cropX,
+                cropRight,
+                redactions
+              );
+              if (sliced) extractedLines.push(sliced);
             }
             cursorY += 30;
           }
@@ -265,8 +470,18 @@ export function captureDocumentBlockSnapshot(params: {
               const lineTop = cursorY - 14;
               const lineBot = cursorY + 4;
               ctx.fillText(line, padX, cursorY);
-              if (lineBot >= cropY && lineTop <= cropBottom && cropRight > padX && line.trim() && !bandHitsRedaction(redactions, lineTop, lineBot, padX, pageWidth - padX)) {
-                extractedLines.push(line.trim());
+              if (!used2dSpans && lineBot >= cropY && lineTop <= cropBottom) {
+                const sliced = extractHorizontalSliceFromLine(
+                  line,
+                  padX,
+                  contentMaxW,
+                  lineTop,
+                  lineBot,
+                  cropX,
+                  cropRight,
+                  redactions
+                );
+                if (sliced) extractedLines.push(sliced);
               }
               cursorY += 22;
             }
@@ -281,11 +496,19 @@ export function captureDocumentBlockSnapshot(params: {
           ctx.lineTo(pageWidth - padX, cursorY);
           ctx.stroke();
 
-          // 본문 텍스트
+          // 본문 텍스트 (2단/다단 줄이면 단의 X 범위를 보존하고, 일반 줄이면 폭에 맞춰 줄바꿈)
           cursorY += 28;
           ctx.font = '400 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
           ctx.fillStyle = isNightMode ? '#E2E8F0' : '#334155';
-          const bodyLines = wrapTextLines(ctx, pdfPage.content || '', contentMaxW);
+          const rawBodyLines = (pdfPage.content || '').split('\n');
+          const bodyLines: string[] = [];
+          for (const rawLine of rawBodyLines) {
+            if (/\t+|\s{2,}|\s+\|\s+/.test(rawLine)) {
+              bodyLines.push(rawLine);
+            } else {
+              bodyLines.push(...wrapTextLines(ctx, rawLine, contentMaxW));
+            }
+          }
           for (const line of bodyLines) {
             if (!line) {
               cursorY += 16;
@@ -294,8 +517,18 @@ export function captureDocumentBlockSnapshot(params: {
             const lineTop = cursorY - 14;
             const lineBot = cursorY + 6;
             ctx.fillText(line, padX, cursorY);
-            if (lineBot >= cropY && lineTop <= cropBottom && cropRight > padX && line.trim() && !bandHitsRedaction(redactions, lineTop, lineBot, padX, pageWidth - padX)) {
-              extractedLines.push(line.trim());
+            if (!used2dSpans && lineBot >= cropY && lineTop <= cropBottom) {
+              const sliced = extractHorizontalSliceFromLine(
+                line,
+                padX,
+                contentMaxW,
+                lineTop,
+                lineBot,
+                cropX,
+                cropRight,
+                redactions
+              );
+              if (sliced) extractedLines.push(sliced);
             }
             cursorY += 24;
           }
@@ -402,17 +635,34 @@ export function captureDocumentBlockSnapshot(params: {
     } catch (err) {
       console.warn('PDF block canvas capture fallback:', err);
     }
-  } else if (isPdfMode && pdfPage && !hasRenderedImage) {
-    // 네이티브 폴백 텍스트 발췌
+  } else if (isPdfMode && pdfPage && !hasRenderedImage && !used2dSpans) {
+    // 네이티브 폴백 텍스트 발췌 (X·Y 모두 반영)
+    const padX = 40;
+    const usableW = Math.max(200, pageWidth - padX * 2);
     const ratioStart = Math.max(0, Math.min(1, (cropY - 120) / Math.max(1, pageHeight - 160)));
     const ratioEnd = Math.max(ratioStart, Math.min(1, (cropBottom - 120) / Math.max(1, pageHeight - 160)));
     const allLines = [pdfPage.title, pdfPage.subtitle || '', ...(pdfPage.content || '').split('\n')].filter(Boolean);
     const startIdx = Math.floor(ratioStart * allLines.length);
     const endIdx = Math.max(startIdx + 1, Math.ceil(ratioEnd * allLines.length));
-    extractedLines.push(...allLines.slice(startIdx, endIdx));
+    allLines.slice(startIdx, endIdx).forEach((line, idx) => {
+      const top = cropY + idx * 20;
+      const sliced = extractHorizontalSliceFromLine(
+        line,
+        padX,
+        usableW,
+        top,
+        top + 20,
+        cropX,
+        cropRight,
+        redactions
+      );
+      if (sliced) extractedLines.push(sliced);
+    });
   }
 
   const combinedText = [...extractedLines, ...matchedTextBoxLines].join('\n').trim();
+  const safeW = Math.max(1, pageWidth);
+  const safeH = Math.max(1, pageHeight);
 
   return {
     imageDataUrl,
@@ -421,6 +671,14 @@ export function captureDocumentBlockSnapshot(params: {
     height: cropH,
     pageNumber: pdfPage?.pageNumber || 1,
     docName: pdfPage?.docName || '문서',
+    sourcePageId: params.pdfPageData?.id || pdfPage?.id,
+    cropRect: { x: cropX, y: cropY, width: cropW, height: cropH },
+    normRect: {
+      x: Number((cropX / safeW).toFixed(4)),
+      y: Number((cropY / safeH).toFixed(4)),
+      width: Number((cropW / safeW).toFixed(4)),
+      height: Number((cropH / safeH).toFixed(4)),
+    },
   };
 }
 
@@ -454,6 +712,8 @@ export async function captureDocumentBlockSnapshotAsync(params: {
     isNightMode: params.isNightMode,
     paperTemplate: params.paperTemplate,
     pdfPage: params.pdfPage,
+    pdfPageData: params.pdfPageData,
+    textItems: params.pdfPageData?.textItems || params.pdfPage?.textItems,
     strokes: params.strokes,
     textBoxes: params.textBoxes,
     redactions: params.redactions,

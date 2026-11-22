@@ -222,9 +222,15 @@ export const StickyCard: React.FC<StickyCardProps> = React.memo(({
     toggleArchiveNote,
     openReminderModal,
     deleteNote,
+    openPdfSourceLink,
   } = useNoteStore.getState();
 
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+  const primarySourceLink =
+    note.pdfSourceLink ||
+    (note.pdfSourceLinks && note.pdfSourceLinks.length > 0
+      ? note.pdfSourceLinks[note.pdfSourceLinks.length - 1]
+      : undefined);
 
   const colorConfig = NOTE_COLORS[note.color] || NOTE_COLORS.yellow;
   const rotationDeg = isCanvasItem ? `${note.rotation || 0}deg` : '0deg';
@@ -474,6 +480,42 @@ export const StickyCard: React.FC<StickyCardProps> = React.memo(({
             </Text>
           </TouchableOpacity>
         ) : null}
+
+        {/* PDF 발췌 스티커: 원문 보기 참조 링크 버튼 */}
+        {!note.isLocked && primarySourceLink && (
+          <TouchableOpacity
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              alignSelf: 'flex-start',
+              gap: 5,
+              backgroundColor: '#EFF6FF',
+              borderWidth: 1,
+              borderColor: '#93C5FD',
+              paddingHorizontal: 9,
+              paddingVertical: 4,
+              borderRadius: 8,
+              marginBottom: 6,
+            }}
+            onPress={(e) => {
+              e.stopPropagation();
+              openPdfSourceLink(primarySourceLink);
+            }}
+            {...(Platform.OS === 'web'
+              ? ({
+                  onClick: (e: any) => {
+                    e.stopPropagation();
+                    openPdfSourceLink(primarySourceLink);
+                  },
+                } as any)
+              : {})}
+          >
+            <Ionicons name="book-outline" size={12} color="#1D4ED8" />
+            <Text style={{ fontSize: 11, fontWeight: '800', color: '#1D4ED8' }}>
+              원문 보기 (발췌 위치 이동 →)
+            </Text>
+          </TouchableOpacity>
+        )}
 
         {/* Reminder Badge */}
         {note.reminder && (

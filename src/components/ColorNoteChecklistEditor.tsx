@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
@@ -42,10 +42,13 @@ import { NOTE_COLORS, COLOR_KEYS } from '../constants/colors';
 import { useNoteStore } from '../store/useNoteStore';
 import { AudioRecordingStudio } from './AudioRecordingStudio';
 import { ColorNoteColorMapModal } from './ColorNoteColorMapModal';
+import { EditorExitRef, useEditorAutosave } from '../utils/useEditorAutosave';
+import { waitForNotesWrite } from '../utils/notePersistence';
 
 interface ColorNoteChecklistEditorProps {
   note?: Note | null;
   onClose: () => void;
+  exitRef?: EditorExitRef;
 }
 
 const CHECKLIST_FONT_SIZES: { key: NoteFontSize; label: string; size: number }[] = [
@@ -58,6 +61,7 @@ const CHECKLIST_FONT_SIZES: { key: NoteFontSize; label: string; size: number }[]
 export const ColorNoteChecklistEditor: React.FC<ColorNoteChecklistEditorProps> = ({
   note: initialNote,
   onClose,
+  exitRef,
 }) => {
   const {
     notes,
@@ -71,7 +75,8 @@ export const ColorNoteChecklistEditor: React.FC<ColorNoteChecklistEditorProps> =
     openReminderModal,
   } = useNoteStore();
 
-  const [noteId] = useState<string>(initialNote?.id || '');
+  const [noteId, setNoteId] = useState<string>(initialNote?.id || '');
+  const noteIdRef = useRef<string>(initialNote?.id || '');
   const liveNote = notes.find((n) => n.id === noteId) || initialNote || null;
 
   const [title, setTitle] = useState<string>(initialNote?.title || '');
@@ -126,8 +131,8 @@ export const ColorNoteChecklistEditor: React.FC<ColorNoteChecklistEditorProps> =
     const idx = CHECKLIST_FONT_SIZES.findIndex((f) => f.key === fontSize);
     const next = CHECKLIST_FONT_SIZES[(idx + 1) % CHECKLIST_FONT_SIZES.length];
     setFontSize(next.key);
-    if (noteId) {
-      updateNote(noteId, { fontSize: next.key });
+    if (noteIdRef.current) {
+      updateNote(noteIdRef.current, { fontSize: next.key });
     }
     showToast(`🔤 글자 크기: ${next.label} (${next.size}px)`);
   };
@@ -171,48 +176,56 @@ export const ColorNoteChecklistEditor: React.FC<ColorNoteChecklistEditorProps> =
   const completedCount = items.filter((item) => item.completed).length;
   const progressPercent = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
 
-  // 저장 및 종료
-  const handleSaveAndExit = () => {
-    // 항목도 없고 제목도 없으면 저장하지 않고 닫기
-    if (!title.trim() && items.length === 0 && audioNotes.length === 0) {
-      onClose();
-      return;
+  // 실시간 자동 저장 스냅샷 (400ms 디바운스 + 백그라운드/언마운트/뒤로 가기 즉시 flush)
+  const autosaveSnapshot = useMemo(() => {
+    const effectiveItems = newItemText.trim()
+      ? [...items, { id: 'chk_draft_inline', text: newItemText.trim(), completed: false }]
+      : items;
+    if (!noteIdRef.current && !title.trim() && effectiveItems.length === 0 && audioNotes.length === 0) {
+      return null;
     }
+    return {
+      title: title.trim() || '체크리스트 할 일',
+      checklist: effectiveItems,
+      color,
+      isPinned,
+      isLocked,
+      fontSize,
+      boardId,
+      tags,
+      audioNotes,
+    };
+  }, [title, items, newItemText, color, isPinned, isLocked, fontSize, boardId, tags, audioNotes]);
 
-    const finalTitle = title.trim() || '체크리스트 할 일';
+  const writeAutosave = useCallback(
+    async (snap: NonNullable<typeof autosaveSnapshot>) => {
+      if (noteIdRef.current) {
+        updateNote(noteIdRef.current, {
+          ...snap,
+          noteType: 'checklist',
+        });
+      } else {
+        const createdId = addNote({
+          ...snap,
+          content: initialNote?.content || '',
+          decoStyle: 'minimal',
+          images: [],
+          noteType: 'checklist',
+        });
+        noteIdRef.current = createdId;
+        setNoteId(createdId);
+      }
+      await waitForNotesWrite();
+    },
+    [addNote, updateNote, initialNote?.content]
+  );
 
-    if (noteId) {
-      updateNote(noteId, {
-        title: finalTitle,
-        checklist: items,
-        color,
-        isPinned,
-        isLocked,
-        fontSize,
-        boardId,
-        tags,
-        audioNotes,
-        noteType: 'checklist',
-      });
-    } else {
-      addNote({
-        title: finalTitle,
-        content: initialNote?.content || '',
-        color,
-        decoStyle: 'minimal',
-        images: [],
-        checklist: items,
-        tags,
-        isPinned,
-        isLocked,
-        fontSize,
-        audioNotes,
-        boardId,
-        noteType: 'checklist',
-      });
-    }
-    onClose();
-  };
+  const { close: handleSaveAndExit, label: autosaveLabel } = useEditorAutosave(
+    autosaveSnapshot,
+    writeAutosave,
+    onClose,
+    exitRef
+  );
 
   // 새 항목 추가
   const handleAddItem = () => {
@@ -317,8 +330,8 @@ export const ColorNoteChecklistEditor: React.FC<ColorNoteChecklistEditorProps> =
 
   // 메모 삭제
   const handleDeleteNote = () => {
-    if (noteId) {
-      deleteNote(noteId);
+    if (noteIdRef.current) {
+      deleteNote(noteIdRef.current);
     }
     onClose();
   };
@@ -336,9 +349,17 @@ export const ColorNoteChecklistEditor: React.FC<ColorNoteChecklistEditorProps> =
         <View style={[styles.headerBar, { borderBottomColor: activeColorConfig.cardBorder }]}>
           <TouchableOpacity
             style={styles.headerIconButton}
-            onPress={handleSaveAndExit}
+            onPress={() => {
+              void handleSaveAndExit();
+            }}
             hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-            {...(Platform.OS === 'web' ? ({ onClick: handleSaveAndExit } as any) : {})}
+            {...(Platform.OS === 'web'
+              ? ({
+                  onClick: () => {
+                    void handleSaveAndExit();
+                  },
+                } as any)
+              : {})}
           >
             <ArrowLeft size={24} color="#1E293B" />
           </TouchableOpacity>
@@ -352,6 +373,29 @@ export const ColorNoteChecklistEditor: React.FC<ColorNoteChecklistEditorProps> =
             onChangeText={setTitle}
             maxLength={80}
           />
+
+          {/* 실시간 자동 저장 상태 표시 ('저장 중…' / '저장됨' / '저장 실패 · 다시 시도') */}
+          {Boolean(autosaveLabel) && (
+            <View
+              style={{
+                paddingHorizontal: 8,
+                paddingVertical: 3,
+                borderRadius: 8,
+                backgroundColor: 'rgba(15, 23, 42, 0.08)',
+                marginRight: 4,
+              }}
+            >
+              <Text
+                style={{
+                  fontSize: 11,
+                  fontWeight: '700',
+                  color: '#1E293B',
+                }}
+              >
+                {autosaveLabel}
+              </Text>
+            </View>
+          )}
 
           {/* 액션 아이콘들 */}
           <View style={styles.headerActions}>

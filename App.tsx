@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   StyleSheet,
   View,
@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import { Plus } from 'lucide-react-native';
+import { ChevronUp, Pencil } from 'lucide-react-native';
 
 import { useNoteStore } from './src/store/useNoteStore';
 import { Header } from './src/components/Header';
@@ -45,6 +45,7 @@ export default function App() {
 
   const loadInitialData = useNoteStore((s) => s.loadInitialData);
   const openCreateNoteSheet = useNoteStore((s) => s.openCreateNoteSheet);
+  const openTextEditor = useNoteStore((s) => s.openColorNoteTextEditor);
   const closeDedicatedEditor = useNoteStore((s) => s.closeDedicatedEditor);
   const closeReminderModal = useNoteStore((s) => s.closeReminderModal);
   const closeTrashModal = useNoteStore((s) => s.closeTrashModal);
@@ -55,6 +56,14 @@ export default function App() {
   const checkPendingAlarms = useNoteStore((s) => s.checkPendingAlarms);
 
   const [isBackupModalOpen, setIsBackupModalOpen] = useState(false);
+  const editorExitRef = useRef<(() => void) | null>(null);
+  const requestCloseEditor = () => {
+    if (editorExitRef.current) {
+      editorExitRef.current();
+    } else {
+      closeDedicatedEditor();
+    }
+  };
 
   useEffect(() => {
     loadInitialData();
@@ -98,45 +107,57 @@ export default function App() {
             <CalendarView />
           )}
 
-          {/* Floating Action Button (DrawNote & Notewise 스타일 + 버튼) */}
-          <TouchableOpacity
-            style={styles.fab}
-            onPress={openCreateNoteSheet}
-            activeOpacity={0.85}
-          >
-            <Plus size={22} color="#0F172A" strokeWidth={2.5} />
-            <Text style={styles.fabText}>새 메모 작성</Text>
-          </TouchableOpacity>
+          <View style={styles.fab}>
+            <TouchableOpacity
+              style={styles.quickWrite}
+              accessibilityRole="button"
+              onPress={() => openTextEditor(null)}
+            >
+              <Pencil size={19} color="#0F172A" />
+              <Text style={styles.fabText}>메모 쓰기</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.moreTypes}
+              accessibilityRole="button"
+              accessibilityLabel="다른 메모 유형 선택"
+              onPress={openCreateNoteSheet}
+            >
+              <ChevronUp size={20} color="#0F172A" />
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* 1:1 벤치마크 신규 메모 선택 바텀시트 (DrawNote & Notewise) */}
         <CreateNoteBottomSheet />
 
-        {/* 1:1 벤치마크 전용 에디터들 */}
+        {/* 1:1 벤치마크 전용 에디터들 (Android 시스템 뒤로 가기도 저장 flush 후 종료) */}
         {activeEditorType === 'text' && (
-          <Modal visible={true} animationType="slide" onRequestClose={closeDedicatedEditor}>
+          <Modal visible={true} animationType="slide" onRequestClose={requestCloseEditor}>
             <ColorNoteTextEditor
               note={selectedNoteForDedicatedEditor}
               onClose={closeDedicatedEditor}
+              exitRef={editorExitRef}
             />
           </Modal>
         )}
 
         {activeEditorType === 'checklist' && (
-          <Modal visible={true} animationType="slide" onRequestClose={closeDedicatedEditor}>
+          <Modal visible={true} animationType="slide" onRequestClose={requestCloseEditor}>
             <ColorNoteChecklistEditor
               note={selectedNoteForDedicatedEditor}
               onClose={closeDedicatedEditor}
+              exitRef={editorExitRef}
             />
           </Modal>
         )}
 
         {(activeEditorType === 'canvas' || activeEditorType === 'pdf') && (
-          <Modal visible={true} animationType="slide" onRequestClose={closeDedicatedEditor}>
+          <Modal visible={true} animationType="slide" onRequestClose={requestCloseEditor}>
             <DocumentWorkspaceModal
               note={selectedNoteForDedicatedEditor}
               initialMode={activeEditorType}
               onClose={closeDedicatedEditor}
+              exitRef={editorExitRef}
             />
           </Modal>
         )}
@@ -209,10 +230,7 @@ const styles = StyleSheet.create({
     right: 20,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    backgroundColor: '#FDE047', // 포스트잇 대표 옐로우 컬러
-    paddingVertical: 14,
-    paddingHorizontal: 20,
+    backgroundColor: '#FDE047',
     borderRadius: 30,
     shadowColor: '#CA8A04',
     shadowOffset: { width: 0, height: 4 },
@@ -227,5 +245,21 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
     color: '#0F172A',
+  },
+  quickWrite: {
+    minHeight: 48,
+    paddingLeft: 18,
+    paddingRight: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  moreTypes: {
+    width: 46,
+    minHeight: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderLeftWidth: 1,
+    borderLeftColor: '#D5B934',
   },
 });

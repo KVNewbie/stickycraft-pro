@@ -17,12 +17,14 @@ import {
   EditorTab,
   EditorMode,
   FreeHandStroke,
+  PdfSourceLink,
 } from '../types/note';
 import { DEFAULT_BOARDS } from '../constants/colors';
 import { INITIAL_MOCK_NOTES } from '../constants/mockData';
 import { saveAutoBackupSnapshot } from '../utils/autoBackup';
+import { NOTES_STORAGE_KEY, persistNotes } from '../utils/notePersistence';
 
-const STORAGE_KEY_NOTES = '@stickycraft_notes_v1';
+const STORAGE_KEY_NOTES = NOTES_STORAGE_KEY;
 const STORAGE_KEY_BOARDS = '@stickycraft_boards_v1';
 const STORAGE_KEY_VIEWMODE = '@stickycraft_viewmode_v1';
 const STORAGE_KEY_WIDGETS = '@stickycraft_widgets_v1';
@@ -352,6 +354,20 @@ interface NoteState {
   addCanvasBoardStroke: (stroke: FreeHandStroke) => void;
   setCanvasBoardStrokes: (strokes: FreeHandStroke[]) => void;
   clearCanvasBoardStrokes: () => void;
+
+  // 3차/4차: 스티커 원문 보기(문서·페이지 고유 ID 및 발췌 영역 하이라이트) & 홈 통합 검색 쪽수 이동
+  pendingPdfTarget: {
+    noteId?: string;
+    pageNumber?: number;
+    pageId?: string;
+    normRect?: { x: number; y: number; width: number; height: number };
+    cropRect?: { x: number; y: number; width: number; height: number };
+    excerptText?: string;
+    searchQuery?: string;
+  } | null;
+  clearPendingPdfTarget: () => void;
+  openPdfSourceLink: (link: PdfSourceLink) => boolean;
+  openPdfNoteAtPage: (note: Note, pageNumber: number, searchQuery?: string) => void;
 }
 
 const initialFilters: FilterOptions = {
@@ -477,8 +493,86 @@ export const useNoteStore = create<NoteState>((set, get) => ({
   selectedNoteForDedicatedEditor: null,
   autoStartVoiceRecording: false,
   pendingCalendarDate: null,
+  pendingPdfTarget: null,
 
   setPendingCalendarDate: (date) => set({ pendingCalendarDate: date }),
+  clearPendingPdfTarget: () => set({ pendingPdfTarget: null }),
+
+  openPdfSourceLink: (link) => {
+    const state = get();
+    const activeNotes = state.notes.filter((n) => !n.isDeleted);
+    // 1. 페이지 고유 ID(sourcePageId)가 소속된 문서 우선 탐색 (병합/분할/파일명 변경에도 정확히 추적)
+    let targetNote =
+      activeNotes.find(
+        (n) =>
+          Array.isArray(n.pdfPages) &&
+          Boolean(link.sourcePageId) &&
+          n.pdfPages.some((p) => p.id === link.sourcePageId)
+      ) || null;
+    // 2. 원본 노트 ID(sourceNoteId) 또는 문서 고유 UID(sourceDocUid)로 탐색
+    if (!targetNote && link.sourceNoteId) {
+      targetNote = activeNotes.find((n) => n.id === link.sourceNoteId) || null;
+    }
+    if (!targetNote && link.sourceDocUid) {
+      targetNote = activeNotes.find((n) => n.pdfDocUid === link.sourceDocUid) || null;
+    }
+    // 3. 문서명(sourceDocName) 또는 발췌 텍스트 포함 PDF 탐색
+    if (!targetNote && link.sourceDocName) {
+      const cleanName = link.sourceDocName.replace(/\.pdf$/i, '').toLowerCase();
+      targetNote =
+        activeNotes.find(
+          (n) =>
+            (n.noteType === 'pdf' || Boolean(n.pdfPages?.length)) &&
+            ((n.title || '').toLowerCase().includes(cleanName) ||
+              (n.pdfName || '').toLowerCase().includes(cleanName))
+        ) || null;
+    }
+    if (!targetNote) return false;
+
+    const pages = targetNote.pdfPages || [];
+    let resolvedPageNumber = link.fallbackPageNumber || 1;
+    // 페이지 순서가 변경되어도 sourcePageId로 현재 페이지 위치를 정확히 찾음
+    if (link.sourcePageId && pages.length > 0) {
+      const pageIdx = pages.findIndex((p) => p.id === link.sourcePageId);
+      if (pageIdx >= 0) {
+        resolvedPageNumber = pageIdx + 1;
+      } else if (link.excerptText) {
+        const needle = link.excerptText.trim().slice(0, 32).toLowerCase();
+        const textIdx = pages.findIndex((p) =>
+          `${p.title}\n${p.subtitle || ''}\n${p.content || ''}`.toLowerCase().includes(needle)
+        );
+        if (textIdx >= 0) resolvedPageNumber = textIdx + 1;
+      }
+    }
+
+    set({
+      pendingPdfTarget: {
+        noteId: targetNote.id,
+        pageNumber: resolvedPageNumber,
+        pageId: link.sourcePageId,
+        normRect: link.normRect,
+        cropRect: link.cropRect,
+        excerptText: link.excerptText,
+      },
+      activeEditorType: 'pdf',
+      selectedNoteForDedicatedEditor: targetNote,
+      isCreateNoteSheetOpen: false,
+    });
+    return true;
+  },
+
+  openPdfNoteAtPage: (note, pageNumber, searchQuery) => {
+    set({
+      pendingPdfTarget: {
+        noteId: note.id,
+        pageNumber: Math.max(1, pageNumber || 1),
+        searchQuery,
+      },
+      activeEditorType: 'pdf',
+      selectedNoteForDedicatedEditor: note,
+      isCreateNoteSheetOpen: false,
+    });
+  },
 
   openCreateNoteSheet: () => set({ isCreateNoteSheetOpen: true }),
   closeCreateNoteSheet: () => set({ isCreateNoteSheetOpen: false }),
@@ -521,6 +615,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
       selectedNoteForDedicatedEditor: null,
       autoStartVoiceRecording: false,
       pendingCalendarDate: null,
+      pendingPdfTarget: null,
     }),
 
   // 탭 및 모드 시스템
@@ -699,13 +794,13 @@ export const useNoteStore = create<NoteState>((set, get) => ({
         isLoading: false,
       });
 
-      // 자동 백업 실행 (데이터 보존용 스냅샷)
+      // 자동 백업 실행 (데이터 보존용 스냅샷 - PIN 평문 제외, 보드 직접 그린 필기 포함)
       if (finalAutoBackup) {
         saveAutoBackupSnapshot({
           notes: finalNotes,
           boards: finalBoards,
           widgets: finalWidgets,
-          masterPin: savedPin || null,
+          canvasBoardStrokes: finalCanvasStrokes,
           calendarStickers: parsedStickers,
         });
       }
@@ -778,7 +873,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
               : n
           );
           set({ notes: updated });
-          AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updated)).catch(console.error);
+          persistNotes(updated).catch(console.error);
         },
       });
       return;
@@ -794,7 +889,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
       };
     });
     set({ notes: updatedNotes });
-    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+    persistNotes(updatedNotes).catch(console.error);
   },
 
   // ColorNote 기능 3: 휴지통(Trash) & 보관함(Archive)
@@ -805,7 +900,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
       note.id === id ? { ...note, isDeleted: true, deletedAt: Date.now(), updatedAt: Date.now() } : note
     );
     set({ notes: updatedNotes });
-    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+    persistNotes(updatedNotes).catch(console.error);
   },
   restoreNote: (id) => {
     const state = get();
@@ -813,7 +908,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
       note.id === id ? { ...note, isDeleted: false, deletedAt: undefined, updatedAt: Date.now() } : note
     );
     set({ notes: updatedNotes });
-    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+    persistNotes(updatedNotes).catch(console.error);
   },
   permanentDeleteNote: (id) => {
     const state = get();
@@ -821,7 +916,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
     // 연관된 위젯도 함께 정리
     const updatedWidgets = state.widgets.filter((w) => w.noteId !== id);
     set({ notes: updatedNotes, widgets: updatedWidgets });
-    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+    persistNotes(updatedNotes).catch(console.error);
     AsyncStorage.setItem(STORAGE_KEY_WIDGETS, JSON.stringify(updatedWidgets)).catch(console.error);
   },
   emptyTrash: () => {
@@ -830,7 +925,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
     const updatedNotes = state.notes.filter((n) => !n.isDeleted);
     const updatedWidgets = state.widgets.filter((w) => !deletedIds.has(w.noteId));
     set({ notes: updatedNotes, widgets: updatedWidgets });
-    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+    persistNotes(updatedNotes).catch(console.error);
     AsyncStorage.setItem(STORAGE_KEY_WIDGETS, JSON.stringify(updatedWidgets)).catch(console.error);
   },
   toggleArchiveNote: (id) => {
@@ -839,7 +934,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
       note.id === id ? { ...note, isArchived: !note.isArchived, updatedAt: Date.now() } : note
     );
     set({ notes: updatedNotes });
-    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+    persistNotes(updatedNotes).catch(console.error);
   },
 
   // ColorNote 기능 4: 리마인더 & 알람
@@ -849,7 +944,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
       note.id === id ? { ...note, reminder, updatedAt: Date.now() } : note
     );
     set({ notes: updatedNotes });
-    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+    persistNotes(updatedNotes).catch(console.error);
   },
   openReminderModal: (note) => set({ isReminderModalOpen: true, reminderTargetNote: note }),
   closeReminderModal: () => set({ isReminderModalOpen: false, reminderTargetNote: null }),
@@ -879,7 +974,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
       return { ...note, checklist: updatedChecklist, updatedAt: Date.now() };
     });
     set({ notes: updatedNotes });
-    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+    persistNotes(updatedNotes).catch(console.error);
   },
 
   uncheckAllChecklist: (noteId) => {
@@ -890,7 +985,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
       return { ...note, checklist: updatedChecklist, updatedAt: Date.now() };
     });
     set({ notes: updatedNotes });
-    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+    persistNotes(updatedNotes).catch(console.error);
   },
 
   toggleAutoSortChecked: (noteId) => {
@@ -905,7 +1000,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
       return { ...note, autoSortChecked: willSort, checklist: list, updatedAt: Date.now() };
     });
     set({ notes: updatedNotes });
-    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+    persistNotes(updatedNotes).catch(console.error);
   },
 
   // ColorNote 기능 6: 캘린더 날짜
@@ -943,9 +1038,15 @@ export const useNoteStore = create<NoteState>((set, get) => ({
           }
         : undefined);
 
+    const isPdfNote =
+      data.noteType === 'pdf' ||
+      Boolean(data.pdfPages && data.pdfPages.length > 0) ||
+      Boolean(data.pdfName);
+
     const newNote: Note = {
       ...data,
       id: newNoteId,
+      pdfDocUid: data.pdfDocUid || (isPdfNote ? `pdfdoc_${newNoteId}` : undefined),
       boardId: resolvedBoardId,
       reminder: resolvedReminder,
       canvasX: safePos.x,
@@ -958,13 +1059,13 @@ export const useNoteStore = create<NoteState>((set, get) => ({
 
     const updatedNotes = [newNote, ...state.notes];
     set({ notes: updatedNotes, pendingCalendarDate: null });
-    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+    persistNotes(updatedNotes).catch(console.error);
     if (state.autoBackupEnabled) {
       saveAutoBackupSnapshot({
-        notes: updatedNotes,
+        notes: updatedNotes.map(({ lockPin, ...rest }) => rest),
         boards: state.boards,
         widgets: state.widgets,
-        masterPin: state.masterPin,
+        canvasBoardStrokes: state.canvasBoardStrokes,
         calendarStickers: state.calendarDateStickers,
       });
     }
@@ -976,8 +1077,23 @@ export const useNoteStore = create<NoteState>((set, get) => ({
     const updatedNotes = state.notes.map((note) =>
       note.id === id ? { ...note, ...data, updatedAt: Date.now() } : note
     );
-    set({ notes: updatedNotes });
-    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+    set((prev) => ({
+      notes: updatedNotes,
+      selectedNoteForDedicatedEditor:
+        prev.selectedNoteForDedicatedEditor && prev.selectedNoteForDedicatedEditor.id === id
+          ? { ...prev.selectedNoteForDedicatedEditor, ...data, updatedAt: Date.now() }
+          : prev.selectedNoteForDedicatedEditor,
+    }));
+    persistNotes(updatedNotes).catch(console.error);
+    if (state.autoBackupEnabled) {
+      saveAutoBackupSnapshot({
+        notes: updatedNotes.map(({ lockPin, ...rest }) => rest),
+        boards: state.boards,
+        widgets: state.widgets,
+        canvasBoardStrokes: state.canvasBoardStrokes,
+        calendarStickers: state.calendarDateStickers,
+      });
+    }
   },
 
   duplicateNote: (id) => {
@@ -1005,7 +1121,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
     };
     const updatedNotes = [newNote, ...state.notes];
     set({ notes: updatedNotes });
-    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+    persistNotes(updatedNotes).catch(console.error);
   },
 
   togglePin: (id) => {
@@ -1014,7 +1130,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
       note.id === id ? { ...note, isPinned: !note.isPinned, updatedAt: Date.now() } : note
     );
     set({ notes: updatedNotes });
-    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+    persistNotes(updatedNotes).catch(console.error);
   },
 
   toggleChecklistItem: (noteId, itemId) => {
@@ -1030,7 +1146,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
       return { ...note, checklist: updatedChecklist, updatedAt: Date.now() };
     });
     set({ notes: updatedNotes });
-    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+    persistNotes(updatedNotes).catch(console.error);
   },
 
   updateCanvasPosition: (id, x, y) => {
@@ -1041,7 +1157,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
       note.id === id ? { ...note, canvasX: safePos.x, canvasY: safePos.y } : note
     );
     set({ notes: updatedNotes });
-    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+    persistNotes(updatedNotes).catch(console.error);
   },
 
   arrangeCanvasNotes: () => {
@@ -1072,7 +1188,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
       };
     });
     set({ notes: updatedNotes });
-    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+    persistNotes(updatedNotes).catch(console.error);
   },
 
   bringToFront: (id) => {
@@ -1117,7 +1233,7 @@ export const useNoteStore = create<NoteState>((set, get) => ({
     const updatedNotes = state.notes.map((n) => (n.boardId === id ? { ...n, boardId: 'ideas' } : n));
     set({ boards: updatedBoards, notes: updatedNotes, activeBoardId: 'all' });
     AsyncStorage.setItem(STORAGE_KEY_BOARDS, JSON.stringify(updatedBoards)).catch(console.error);
-    AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(updatedNotes)).catch(console.error);
+    persistNotes(updatedNotes).catch(console.error);
   },
 
   setSearchQuery: (query) => set((s) => ({ filters: { ...s.filters, searchQuery: query } })),
@@ -1222,41 +1338,60 @@ export const useNoteStore = create<NoteState>((set, get) => ({
 
   exportAllData: () => {
     const state = get();
-    return JSON.stringify({
-      notes: state.notes,
-      boards: state.boards,
-      widgets: state.widgets,
-      masterPin: state.masterPin,
-      calendarStickers: state.calendarDateStickers,
-      lunarDisplayMode: state.lunarDisplayMode,
-      exportedAt: Date.now(),
-    }, null, 2);
+    // 백업 파일에는 보드 직접 필기(canvasBoardStrokes)를 포함하고, 마스터/개별 PIN 평문은 제외
+    const sanitizedNotes = state.notes.map(({ lockPin, ...rest }) => rest);
+    return JSON.stringify(
+      {
+        notes: sanitizedNotes,
+        boards: state.boards,
+        widgets: state.widgets,
+        canvasBoardStrokes: state.canvasBoardStrokes,
+        boardStrokes: state.canvasBoardStrokes,
+        calendarStickers: state.calendarDateStickers,
+        lunarDisplayMode: state.lunarDisplayMode,
+        exportedAt: Date.now(),
+      },
+      null,
+      2
+    );
   },
 
   importAllData: (jsonData) => {
     try {
       const data = JSON.parse(jsonData);
       if (Array.isArray(data.notes)) {
+        const restoredBoardStrokes: FreeHandStroke[] = Array.isArray(data.canvasBoardStrokes)
+          ? data.canvasBoardStrokes
+          : Array.isArray(data.boardStrokes)
+          ? data.boardStrokes
+          : [];
         set({
           notes: data.notes,
           boards: Array.isArray(data.boards) ? data.boards : DEFAULT_BOARDS,
           widgets: Array.isArray(data.widgets) ? data.widgets : [],
-          masterPin: typeof data.masterPin === 'string' ? data.masterPin : null,
-          calendarDateStickers: data.calendarStickers && typeof data.calendarStickers === 'object' ? data.calendarStickers : {},
+          canvasBoardStrokes: restoredBoardStrokes,
+          calendarDateStickers:
+            data.calendarStickers && typeof data.calendarStickers === 'object'
+              ? data.calendarStickers
+              : {},
           ...(data.lunarDisplayMode ? { lunarDisplayMode: data.lunarDisplayMode } : {}),
         });
-        AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(data.notes)).catch(console.error);
+        persistNotes(data.notes).catch(console.error);
         if (Array.isArray(data.boards)) {
           AsyncStorage.setItem(STORAGE_KEY_BOARDS, JSON.stringify(data.boards)).catch(console.error);
         }
         if (Array.isArray(data.widgets)) {
           AsyncStorage.setItem(STORAGE_KEY_WIDGETS, JSON.stringify(data.widgets)).catch(console.error);
         }
-        if (typeof data.masterPin === 'string') {
-          AsyncStorage.setItem(STORAGE_KEY_PIN, data.masterPin).catch(console.error);
-        }
+        AsyncStorage.setItem(
+          STORAGE_KEY_CANVAS_STROKES,
+          JSON.stringify(restoredBoardStrokes)
+        ).catch(console.error);
         if (data.calendarStickers && typeof data.calendarStickers === 'object') {
-          AsyncStorage.setItem(STORAGE_KEY_CALENDAR_STICKERS, JSON.stringify(data.calendarStickers)).catch(console.error);
+          AsyncStorage.setItem(
+            STORAGE_KEY_CALENDAR_STICKERS,
+            JSON.stringify(data.calendarStickers)
+          ).catch(console.error);
         }
         return true;
       }
@@ -1269,21 +1404,41 @@ export const useNoteStore = create<NoteState>((set, get) => ({
 
   resetToMockData: async () => {
     set({ notes: INITIAL_MOCK_NOTES, boards: DEFAULT_BOARDS, activeBoardId: 'all', canvasBoardStrokes: [] });
-    await AsyncStorage.setItem(STORAGE_KEY_NOTES, JSON.stringify(INITIAL_MOCK_NOTES));
+    await persistNotes(INITIAL_MOCK_NOTES);
     await AsyncStorage.setItem(STORAGE_KEY_BOARDS, JSON.stringify(DEFAULT_BOARDS));
     await AsyncStorage.setItem(STORAGE_KEY_CANVAS_STROKES, JSON.stringify([]));
   },
 
   // DrawNote 화이트보드 캔버스 필기 및 연결선
   addCanvasBoardStroke: (stroke: FreeHandStroke) => {
-    const next = [...get().canvasBoardStrokes, stroke];
+    const state = get();
+    const next = [...state.canvasBoardStrokes, stroke];
     set({ canvasBoardStrokes: next });
     AsyncStorage.setItem(STORAGE_KEY_CANVAS_STROKES, JSON.stringify(next)).catch(console.error);
+    if (state.autoBackupEnabled) {
+      saveAutoBackupSnapshot({
+        notes: state.notes.map(({ lockPin, ...rest }) => rest),
+        boards: state.boards,
+        widgets: state.widgets,
+        canvasBoardStrokes: next,
+        calendarStickers: state.calendarDateStickers,
+      });
+    }
   },
 
   setCanvasBoardStrokes: (strokes: FreeHandStroke[]) => {
+    const state = get();
     set({ canvasBoardStrokes: strokes });
     AsyncStorage.setItem(STORAGE_KEY_CANVAS_STROKES, JSON.stringify(strokes)).catch(console.error);
+    if (state.autoBackupEnabled) {
+      saveAutoBackupSnapshot({
+        notes: state.notes.map(({ lockPin, ...rest }) => rest),
+        boards: state.boards,
+        widgets: state.widgets,
+        canvasBoardStrokes: strokes,
+        calendarStickers: state.calendarDateStickers,
+      });
+    }
   },
 
   clearCanvasBoardStrokes: () => {

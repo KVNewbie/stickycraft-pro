@@ -3,7 +3,7 @@ import { Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import * as DocumentPicker from 'expo-document-picker';
-import { Note, Board, WidgetConfig } from '../types/note';
+import { Note, Board, WidgetConfig, FreeHandStroke } from '../types/note';
 
 export const STORAGE_KEY_AUTOBACKUPS = '@stickycraft_autobackups_v1';
 export const STORAGE_KEY_AUTOBACKUP_ENABLED = '@stickycraft_autobackup_enabled_v1';
@@ -15,7 +15,7 @@ export interface BackupPayload {
   notes: Note[];
   boards?: Board[];
   widgets?: WidgetConfig[];
-  masterPin?: string | null;
+  canvasBoardStrokes?: FreeHandStroke[];
   calendarStickers?: Record<string, { emoji: string; label?: string }>;
 }
 

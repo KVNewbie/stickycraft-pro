@@ -1,4 +1,4 @@
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useState, useRef, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
@@ -36,6 +36,7 @@ import {
   Smile,
   Layers,
   Plus,
+  BookOpen,
 } from 'lucide-react-native';
 import {
   Note,
@@ -52,10 +53,13 @@ import { PaperTemplatePattern } from './PaperTemplatePattern';
 import { AudioRecordingStudio } from './AudioRecordingStudio';
 import { ColorNoteColorMapModal } from './ColorNoteColorMapModal';
 import { PlannerStickerModal } from './PlannerStickerModal';
+import { EditorExitRef, useEditorAutosave } from '../utils/useEditorAutosave';
+import { waitForNotesWrite } from '../utils/notePersistence';
 
 interface ColorNoteTextEditorProps {
   note?: Note | null;
   onClose: () => void;
+  exitRef?: EditorExitRef;
 }
 
 const FONT_PRESETS: Record<NoteFontSize, { label: string; size: number; lineHeight: number }> = {
@@ -84,6 +88,7 @@ const DECO_OPTIONS: { id: DecoStyle; label: string }[] = [
 export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
   note: initialNote,
   onClose,
+  exitRef,
 }) => {
   const {
     notes,
@@ -96,9 +101,11 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
     toggleNoteLock,
     toggleArchiveNote,
     openReminderModal,
+    openPdfSourceLink,
   } = useNoteStore();
 
-  const [noteId] = useState<string>(initialNote?.id || '');
+  const [noteId, setNoteId] = useState<string>(initialNote?.id || '');
+  const noteIdRef = useRef<string>(initialNote?.id || '');
   const liveNote = useMemo(
     () => (noteId ? notes.find((n) => n.id === noteId) || initialNote : initialNote),
     [notes, noteId, initialNote]
@@ -161,7 +168,7 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
     if (!tags.includes(cleaned)) {
       const nextTags = [...tags, cleaned];
       setTags(nextTags);
-      if (noteId) updateNote(noteId, { tags: nextTags });
+      if (noteIdRef.current) updateNote(noteIdRef.current, { tags: nextTags });
     }
     setTagInput('');
   };
@@ -169,78 +176,84 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
   const handleRemoveTag = (tagToRemove: string) => {
     const nextTags = tags.filter((t) => t !== tagToRemove);
     setTags(nextTags);
-    if (noteId) updateNote(noteId, { tags: nextTags });
+    if (noteIdRef.current) updateNote(noteIdRef.current, { tags: nextTags });
   };
 
-  // 자동 저장 핸들러
-  const handleSaveAndExit = () => {
-    // 텍스트와 제목이 모두 비어있고 음성/스티커도 없으면 저장하지 않고 닫기
-    if (!title.trim() && !content.trim() && audioNotes.length === 0 && stickers.length === 0) {
-      onClose();
-      return;
-    }
+  // 실시간 자동 저장 스냅샷 (400ms 디바운스 + 백그라운드/언마운트/뒤로 가기 즉시 flush)
+  const autosaveSnapshot = useMemo(() => {
+    const hasContent =
+      Boolean(title.trim()) ||
+      Boolean(content.trim()) ||
+      audioNotes.length > 0 ||
+      stickers.length > 0;
+    if (!noteIdRef.current && !hasContent) return null;
+    return {
+      title: title.trim(),
+      content,
+      color,
+      decoStyle,
+      tags,
+      stickers,
+      boardId,
+      paperTemplate,
+      isPinned,
+      isLocked,
+      audioNotes,
+      fontSize,
+    };
+  }, [
+    title,
+    content,
+    color,
+    decoStyle,
+    tags,
+    stickers,
+    boardId,
+    paperTemplate,
+    isPinned,
+    isLocked,
+    audioNotes,
+    fontSize,
+  ]);
 
-    if (noteId) {
-      updateNote(noteId, {
-        title: title.trim(),
-        content: content,
-        color,
-        decoStyle,
-        tags,
-        stickers,
-        boardId,
-        paperTemplate,
-        isPinned,
-        isLocked,
-        audioNotes,
-        fontSize,
-        noteType: 'text',
-        editorMode: 'text',
-      });
-    } else {
-      addNote({
-        title: title.trim(),
-        content: content,
-        color,
-        decoStyle,
-        images: [],
-        checklist: [],
-        tags,
-        stickers,
-        isPinned,
-        isLocked,
-        audioNotes,
-        fontSize,
-        boardId,
-        paperTemplate,
-        noteType: 'text',
-        editorMode: 'text',
-      });
-    }
-    onClose();
-  };
+  const writeAutosave = useCallback(
+    async (snap: NonNullable<typeof autosaveSnapshot>) => {
+      if (noteIdRef.current) {
+        updateNote(noteIdRef.current, {
+          ...snap,
+          noteType: 'text',
+          editorMode: 'text',
+        });
+      } else {
+        const createdId = addNote({
+          ...snap,
+          images: initialNote?.images || [],
+          checklist: [],
+          noteType: 'text',
+          editorMode: 'text',
+        });
+        noteIdRef.current = createdId;
+        setNoteId(createdId);
+      }
+      await waitForNotesWrite();
+    },
+    [addNote, updateNote, initialNote?.images]
+  );
 
-  // 완료 후 읽기 모드로 전환 (새 메모면 저장 후 종료)
-  const handleCompleteEditing = () => {
-    if (noteId) {
-      updateNote(noteId, {
-        title: title.trim(),
-        content: content,
-        color,
-        decoStyle,
-        tags,
-        stickers,
-        boardId,
-        paperTemplate,
-        isPinned,
-        isLocked,
-        audioNotes,
-        fontSize,
-      });
+  const {
+    flush: flushAutosave,
+    close: handleSaveAndExit,
+    label: autosaveLabel,
+  } = useEditorAutosave(autosaveSnapshot, writeAutosave, onClose, exitRef);
+
+  // 완료 후 읽기 모드로 전환
+  const handleCompleteEditing = async () => {
+    await flushAutosave();
+    if (noteIdRef.current) {
       setIsEditMode(false);
       showToast('✓ 저장되었습니다');
     } else {
-      handleSaveAndExit();
+      await handleSaveAndExit();
     }
   };
 
@@ -271,8 +284,8 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
     const order: NoteFontSize[] = ['sm', 'base', 'lg', 'xl'];
     const next = order[(order.indexOf(fontSize) + 1) % order.length];
     setFontSize(next);
-    if (noteId) {
-      updateNote(noteId, { fontSize: next });
+    if (noteIdRef.current) {
+      updateNote(noteIdRef.current, { fontSize: next });
     }
     showToast(`🔤 글자 크기: ${FONT_PRESETS[next].label} (${FONT_PRESETS[next].size}px) • 줄간격 자동 동기화`);
   };
@@ -311,6 +324,12 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
     }
   }, [content, searchQuery]);
 
+  const primarySourceLink =
+    liveNote?.pdfSourceLink ||
+    (liveNote?.pdfSourceLinks && liveNote.pdfSourceLinks.length > 0
+      ? liveNote.pdfSourceLinks[liveNote.pdfSourceLinks.length - 1]
+      : undefined);
+
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: isDarkTemplate ? '#1E293B' : activeColorConfig.bg }]}>
       {/* Paper Template Background (폰트 lineHeight와 1:1 줄간격 자동 동기화) */}
@@ -331,9 +350,17 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
           {/* Back & Auto-save button */}
           <TouchableOpacity
             style={styles.backBtn}
-            onPress={handleSaveAndExit}
+            onPress={() => {
+              void handleSaveAndExit();
+            }}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            {...(Platform.OS === 'web' ? ({ onClick: handleSaveAndExit } as any) : {})}
+            {...(Platform.OS === 'web'
+              ? ({
+                  onClick: () => {
+                    void handleSaveAndExit();
+                  },
+                } as any)
+              : {})}
           >
             <ArrowLeft size={22} color={effectiveTextColor} />
           </TouchableOpacity>
@@ -363,14 +390,75 @@ export const ColorNoteTextEditor: React.FC<ColorNoteTextEditorProps> = ({
             </TouchableOpacity>
           )}
 
+          {/* 실시간 자동 저장 상태 표시 ('저장 중…' / '저장됨' / '저장 실패 · 다시 시도') */}
+          {Boolean(autosaveLabel) && (
+            <View
+              style={{
+                paddingHorizontal: 8,
+                paddingVertical: 3,
+                borderRadius: 8,
+                backgroundColor: 'rgba(15, 23, 42, 0.08)',
+                marginRight: 4,
+              }}
+            >
+              <Text
+                style={{
+                  fontSize: 11,
+                  fontWeight: '700',
+                  color: effectiveTextColor,
+                }}
+              >
+                {autosaveLabel}
+              </Text>
+            </View>
+          )}
+
+          {/* 발췌 스티커인 경우: 원본 PDF의 해당 문단으로 바로 돌아가는 '원문 보기' 버튼 */}
+          {primarySourceLink && (
+            <TouchableOpacity
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 4,
+                backgroundColor: '#EFF6FF',
+                borderWidth: 1,
+                borderColor: '#93C5FD',
+                paddingHorizontal: 9,
+                paddingVertical: 5,
+                borderRadius: 10,
+                marginRight: 4,
+              }}
+              onPress={async () => {
+                await flushAutosave();
+                const ok = openPdfSourceLink(primarySourceLink);
+                if (!ok) {
+                  showToast('원본 PDF 문서를 찾을 수 없습니다.');
+                }
+              }}
+            >
+              <BookOpen size={13} color="#1D4ED8" />
+              <Text style={{ fontSize: 11.5, fontWeight: '800', color: '#1D4ED8' }}>
+                원문 보기
+              </Text>
+            </TouchableOpacity>
+          )}
+
           {/* Right Action Buttons */}
           <View style={styles.headerActions}>
             {/* View/Edit Mode Indicator & Switcher */}
             {isEditMode ? (
               <TouchableOpacity
                 style={styles.completeBtn}
-                onPress={handleCompleteEditing}
-                {...(Platform.OS === 'web' ? ({ onClick: handleCompleteEditing } as any) : {})}
+                onPress={() => {
+                  void handleCompleteEditing();
+                }}
+                {...(Platform.OS === 'web'
+                  ? ({
+                      onClick: () => {
+                        void handleCompleteEditing();
+                      },
+                    } as any)
+                  : {})}
               >
                 <Check size={16} color="#FFFFFF" strokeWidth={2.5} />
                 <Text style={styles.completeBtnText}>완료</Text>

@@ -1,7 +1,9 @@
 import { Platform } from 'react-native';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as Sharing from 'expo-sharing';
 // Metro ESM tslib.default 호환성 충돌을 방지하기 위해 단일 번들(pdf-lib.min.js)에서 로드
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { PDFDocument, degrees } = require('pdf-lib/dist/pdf-lib.min.js') as typeof import('pdf-lib');
+export const { PDFDocument, degrees, rgb } = require('pdf-lib/dist/pdf-lib.min.js') as typeof import('pdf-lib');
 import {
   FreeHandStroke,
   FreeTextBox,
@@ -12,10 +14,66 @@ import {
   PdfPageData,
   PdfRedactionRect,
   PdfStampItem,
+  PdfTextSpan,
   PdfWatermarkConfig,
 } from '../types/note';
 
 let cachedPdfJs: any = null;
+
+/**
+ * 원본 PDF 바이너리 메모리 레지스트리
+ * - 보이는 쪽부터 지연 렌더링(ensurePdfPageRendered)
+ * - PDF 내보내기 시 원본 벡터 텍스트 페이지 보존(copyPages)
+ */
+const pdfBinaryRegistry = new Map<string, Uint8Array>();
+
+export function registerPdfBinary(sourceDocId: string, bytes: Uint8Array): void {
+  pdfBinaryRegistry.set(sourceDocId, bytes);
+}
+
+export function getPdfBinary(sourceDocId?: string): Uint8Array | null {
+  if (!sourceDocId) return null;
+  return pdfBinaryRegistry.get(sourceDocId) || null;
+}
+
+export function base64ToUint8Array(base64: string): Uint8Array {
+  const clean = base64.includes(',') ? base64.split(',')[1] : base64;
+  if (typeof atob === 'function') {
+    const bin = atob(clean);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const lookup = new Uint8Array(256);
+  for (let i = 0; i < chars.length; i++) lookup[chars.charCodeAt(i)] = i;
+  let bufferLength = clean.length * 0.75;
+  if (clean[clean.length - 1] === '=') bufferLength--;
+  if (clean[clean.length - 2] === '=') bufferLength--;
+  const bytes = new Uint8Array(bufferLength);
+  let p = 0;
+  for (let i = 0; i < clean.length; i += 4) {
+    const encoded1 = lookup[clean.charCodeAt(i)];
+    const encoded2 = lookup[clean.charCodeAt(i + 1)];
+    const encoded3 = lookup[clean.charCodeAt(i + 2)];
+    const encoded4 = lookup[clean.charCodeAt(i + 3)];
+    bytes[p++] = (encoded1 << 2) | (encoded2 >> 4);
+    if (p < bufferLength) bytes[p++] = ((encoded2 & 15) << 4) | (encoded3 >> 2);
+    if (p < bufferLength) bytes[p++] = ((encoded3 & 3) << 6) | (encoded4 & 63);
+  }
+  return bytes;
+}
+
+export function uint8ArrayToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const sub = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode.apply(null, Array.from(sub));
+  }
+  if (typeof btoa === 'function') return btoa(binary);
+  return '';
+}
 
 /**
  * public/pdfjs/ 에 배치된 오프라인 pdfjs-dist 엔진을 동적으로 로드 (Metro 번들러 충돌/비대화 0%)
@@ -80,29 +138,101 @@ function wrapCanvasLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: 
 }
 
 /**
- * 실제 업로드된 .pdf 바이너리 파일을 PDF.js로 페이지별 고화질 렌더링 + 읽기 순서 텍스트 추출 + 메타데이터 파싱
+ * 지연 렌더링된 페이지(80쪽 등 대용량 PDF의 중간/후반 페이지)를 실제로 화면에 보여줄 때 즉시 렌더링
+ */
+export async function ensurePdfPageRendered(pageData: PdfPageData): Promise<string | undefined> {
+  if (pageData.renderedImageUri) return pageData.renderedImageUri;
+  if (!pageData.sourceDocId || !pageData.sourcePageNumber) return undefined;
+  const rawBytes = getPdfBinary(pageData.sourceDocId);
+  if (!rawBytes) return undefined;
+
+  const pdfjs = await loadOfflinePdfJs();
+  if (!pdfjs || typeof document === 'undefined') return undefined;
+
+  try {
+    const loadingTask = pdfjs.getDocument({
+      data: new Uint8Array(rawBytes.slice(0)),
+      useSystemFonts: true,
+    });
+    const pdfDoc = await loadingTask.promise;
+    const pNum = Math.max(1, Math.min(pdfDoc.numPages || 1, pageData.sourcePageNumber));
+    const page = await pdfDoc.getPage(pNum);
+    const baseViewport = page.getViewport({ scale: 1.0 });
+    const targetWidth = 960;
+    const renderScale = Math.min(2.0, Math.max(1.0, targetWidth / Math.max(1, baseViewport.width)));
+    const viewport = page.getViewport({ scale: renderScale });
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(viewport.width);
+    canvas.height = Math.round(viewport.height);
+    const ctx = canvas.getContext('2d');
+    let dataUrl: string | undefined;
+    if (ctx) {
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+      pageData.renderedImageUri = dataUrl;
+    }
+    try {
+      await pdfDoc.destroy();
+    } catch {
+      // ignore
+    }
+    return dataUrl;
+  } catch (err) {
+    console.warn('On-demand PDF page render error:', err);
+    return undefined;
+  }
+}
+
+export type PdfInputSource =
+  | File
+  | {
+      name: string;
+      bytes: Uint8Array | ArrayBuffer;
+    };
+
+/**
+ * 실제 업로드된 .pdf 바이너리 파일을 PDF.js로 페이지 제한 없이(80쪽 이상 대용량 포함)
+ * 보이는 쪽부터 고화질 렌더링 + 2단/다단 2D 글자 위치(textItems) 및 읽기 순서 텍스트 추출 + 메타데이터 파싱
  */
 export async function renderRealPdfFile(
-  file: File,
+  fileOrSource: PdfInputSource,
   onProgress?: (current: number, total: number) => void
 ): Promise<{
   pages: PdfPageData[];
   meta: PdfDocumentMeta;
   usedRealRenderer: boolean;
+  sourceDocId: string;
 }> {
-  const baseName = file.name.replace(/\.pdf$/i, '') || '불러온 문서';
-  const arrayBuffer = await file.arrayBuffer();
+  const fileName = fileOrSource.name || '불러온_문서.pdf';
+  const baseName = fileName.replace(/\.pdf$/i, '') || '불러온 문서';
+  const rawBuffer: ArrayBuffer =
+    typeof (fileOrSource as File).arrayBuffer === 'function'
+      ? await (fileOrSource as File).arrayBuffer()
+      : (fileOrSource as { bytes: Uint8Array | ArrayBuffer }).bytes instanceof Uint8Array
+      ? ((fileOrSource as { bytes: Uint8Array }).bytes.buffer.slice(
+          (fileOrSource as { bytes: Uint8Array }).bytes.byteOffset,
+          (fileOrSource as { bytes: Uint8Array }).bytes.byteOffset +
+            (fileOrSource as { bytes: Uint8Array }).bytes.byteLength
+        ) as ArrayBuffer)
+      : ((fileOrSource as { bytes: ArrayBuffer }).bytes as ArrayBuffer);
 
-  // 1차: 실제 PDF.js 엔진으로 원본 레이아웃/표/이미지/텍스트 100% 렌더링
+  const sourceDocId = `pdfsrc_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const rawBytes = new Uint8Array(rawBuffer.slice(0));
+  registerPdfBinary(sourceDocId, rawBytes);
+
+  // 1차: 실제 PDF.js 엔진으로 원본 레이아웃/표/이미지/텍스트 100% 렌더링 (40쪽 제한 완전 해제)
   const pdfjs = await loadOfflinePdfJs();
   if (pdfjs && typeof document !== 'undefined') {
     try {
       const loadingTask = pdfjs.getDocument({
-        data: new Uint8Array(arrayBuffer.slice(0)),
+        data: new Uint8Array(rawBuffer.slice(0)),
         useSystemFonts: true,
       });
       const pdfDoc = await loadingTask.promise;
-      const numPages = Math.max(1, Math.min(40, pdfDoc.numPages || 1));
+      const numPages = Math.max(1, pdfDoc.numPages || 1);
 
       let meta: PdfDocumentMeta = {};
       try {
@@ -117,49 +247,111 @@ export async function renderRealPdfFile(
         // ignore metadata errors
       }
 
+      // 20쪽 이하 문서는 전 페이지 즉시 렌더링, 대용량 문서(예: 60~100쪽)는 초반 12쪽 + 마지막 쪽을 즉시 렌더링하고 나머지는 보이는 즉시 지연 렌더링
+      const eagerRenderThreshold = numPages <= 20 ? numPages : 12;
+
       const pages: PdfPageData[] = [];
       for (let i = 1; i <= numPages; i++) {
         onProgress?.(i, numPages);
         const page = await pdfDoc.getPage(i);
         const baseViewport = page.getViewport({ scale: 1.0 });
-        // A4 기준 1080px 너비 수준으로 선명하고 가볍게 렌더링 (메모리·속도 균형 최적화)
-        const targetWidth = numPages > 15 ? 860 : 1080;
-        const renderScale = Math.min(2.0, Math.max(1.0, targetWidth / Math.max(1, baseViewport.width)));
-        const viewport = page.getViewport({ scale: renderScale });
-
-        const canvas = document.createElement('canvas');
-        canvas.width = Math.round(viewport.width);
-        canvas.height = Math.round(viewport.height);
-        const ctx = canvas.getContext('2d');
+        const pageW = Math.max(1, baseViewport.width);
+        const pageH = Math.max(1, baseViewport.height);
 
         let renderedImageUri: string | undefined;
-        if (ctx) {
-          ctx.fillStyle = '#FFFFFF';
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-          await page.render({ canvasContext: ctx, viewport }).promise;
-          renderedImageUri = canvas.toDataURL('image/jpeg', numPages > 15 ? 0.78 : 0.86);
+        const shouldEagerRender = i <= eagerRenderThreshold || i === numPages;
+        if (shouldEagerRender) {
+          const targetWidth = numPages > 15 ? 860 : 1080;
+          const renderScale = Math.min(2.0, Math.max(1.0, targetWidth / pageW));
+          const viewport = page.getViewport({ scale: renderScale });
+
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.round(viewport.width);
+          canvas.height = Math.round(viewport.height);
+          const ctx = canvas.getContext('2d');
+
+          if (ctx) {
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            await page.render({ canvasContext: ctx, viewport }).promise;
+            renderedImageUri = canvas.toDataURL('image/jpeg', numPages > 15 ? 0.78 : 0.86);
+          }
         }
 
-        // 읽기 순서 기반 텍스트 추출 (문서 내 검색 Ctrl+F 및 블록 발췌 지원)
+        // 실제 글자 위치(X, Y, W, H) 스팬 배열 + 읽기 순서 텍스트 추출 (2단 논문 좌/우 문단 분리 발췌 지원)
         let extractedText = '';
+        const textItems: PdfTextSpan[] = [];
         try {
           const textContent = await page.getTextContent();
-          const lines: string[] = [];
-          let currentLine = '';
-          let lastY: number | null = null;
+          const rawSpans: Array<PdfTextSpan & { rawY: number }> = [];
           for (const item of textContent.items as any[]) {
             const str = typeof item.str === 'string' ? item.str : '';
-            if (!str) continue;
-            const y = Array.isArray(item.transform) ? Math.round(item.transform[5]) : null;
-            if (lastY !== null && y !== null && Math.abs(y - lastY) > 6) {
-              if (currentLine.trim()) lines.push(currentLine.trim());
-              currentLine = str;
-            } else {
-              currentLine += (currentLine && !currentLine.endsWith(' ') && !str.startsWith(' ') ? ' ' : '') + str;
-            }
-            if (y !== null) lastY = y;
+            if (!str || !str.trim()) continue;
+            const tx = Array.isArray(item.transform) ? Number(item.transform[4]) || 0 : 0;
+            const ty = Array.isArray(item.transform) ? Number(item.transform[5]) || 0 : 0;
+            const fontH = Array.isArray(item.transform)
+              ? Math.max(8, Math.hypot(Number(item.transform[2]) || 0, Number(item.transform[3]) || 12))
+              : 12;
+            const itemW =
+              typeof item.width === 'number' && item.width > 0
+                ? item.width
+                : Math.max(fontH * 0.5, str.length * fontH * 0.52);
+            const itemH =
+              typeof item.height === 'number' && item.height > 0 ? item.height : fontH;
+
+            const nx = Math.max(0, Math.min(1, tx / pageW));
+            const topPx = pageH - ty - itemH * 0.85;
+            const ny = Math.max(0, Math.min(1, topPx / pageH));
+            const nw = Math.max(0.005, Math.min(1 - nx, itemW / pageW));
+            const nh = Math.max(0.008, Math.min(1 - ny, (itemH * 1.15) / pageH));
+
+            const span: PdfTextSpan = { text: str, nx, ny, nw, nh };
+            textItems.push(span);
+            rawSpans.push({ ...span, rawY: Math.round(ty) });
           }
-          if (currentLine.trim()) lines.push(currentLine.trim());
+
+          // Y(줄) 기준으로 그룹핑하되 같은 줄 안에서 좌/우 단 간격이 크면 4칸 공백으로 구분
+          const lines: string[] = [];
+          let currentLineSpans: Array<PdfTextSpan & { rawY: number }> = [];
+          let lastY: number | null = null;
+          for (const sp of rawSpans) {
+            if (lastY !== null && Math.abs(sp.rawY - lastY) > 6) {
+              if (currentLineSpans.length > 0) {
+                currentLineSpans.sort((a, b) => a.nx - b.nx);
+                let lineStr = '';
+                let prevRight = 0;
+                for (let k = 0; k < currentLineSpans.length; k++) {
+                  const cur = currentLineSpans[k];
+                  if (k > 0) {
+                    const gap = cur.nx - prevRight;
+                    lineStr += gap > 0.06 ? '    ' : ' ';
+                  }
+                  lineStr += cur.text.trim();
+                  prevRight = cur.nx + cur.nw;
+                }
+                if (lineStr.trim()) lines.push(lineStr.trim());
+              }
+              currentLineSpans = [sp];
+            } else {
+              currentLineSpans.push(sp);
+            }
+            lastY = sp.rawY;
+          }
+          if (currentLineSpans.length > 0) {
+            currentLineSpans.sort((a, b) => a.nx - b.nx);
+            let lineStr = '';
+            let prevRight = 0;
+            for (let k = 0; k < currentLineSpans.length; k++) {
+              const cur = currentLineSpans[k];
+              if (k > 0) {
+                const gap = cur.nx - prevRight;
+                lineStr += gap > 0.06 ? '    ' : ' ';
+              }
+              lineStr += cur.text.trim();
+              prevRight = cur.nx + cur.nw;
+            }
+            if (lineStr.trim()) lines.push(lineStr.trim());
+          }
           extractedText = lines.join('\n').trim();
         } catch {
           // ignore text extraction errors
@@ -170,11 +362,14 @@ export async function renderRealPdfFile(
           id: `pdfp_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`,
           pageNumber: i,
           title: firstLine ? firstLine.slice(0, 48) : `${baseName} — Page ${i}`,
-          subtitle: `${file.name} (${i}/${numPages} 페이지 · 원본 PDF 렌더링)`,
+          subtitle: `${fileName} (${i}/${numPages} 페이지 · 원본 PDF)`,
           content: extractedText,
-          sourcePdfName: file.name,
+          sourcePdfName: fileName,
           renderedImageUri,
-          aspectRatio: baseViewport.width / Math.max(1, baseViewport.height),
+          aspectRatio: pageW / pageH,
+          textItems,
+          sourceDocId,
+          sourcePageNumber: i,
         });
       }
 
@@ -184,31 +379,53 @@ export async function renderRealPdfFile(
         // ignore
       }
 
-      return { pages, meta, usedRealRenderer: true };
+      return { pages, meta, usedRealRenderer: true, sourceDocId };
     } catch (err) {
-      console.warn('PDF.js render failed, falling back to lightweight parser:', err);
+      console.warn('PDF.js render failed, falling back to pdf-lib / byte parser:', err);
     }
   }
 
-  // 2차 폴백: 경량 바이트 파서
-  const bytes = new Uint8Array(arrayBuffer);
-  let raw = '';
-  const maxScan = Math.min(bytes.length, 400_000);
-  for (let i = 0; i < maxScan; i++) {
-    raw += String.fromCharCode(bytes[i]);
+  // 2차 폴백 (모바일 네이티브 및 PDF.js 미동작 시): pdf-lib + 전체 바이트 스캔 (페이지 수 30쪽 제한 제거)
+  let pageCount = 1;
+  let fallbackMeta: PdfDocumentMeta = {};
+  const pageAspects: number[] = [];
+
+  try {
+    const pdfLibDoc = await PDFDocument.load(rawBytes, { ignoreEncryption: true });
+    pageCount = Math.max(1, pdfLibDoc.getPageCount());
+    fallbackMeta = {
+      author: pdfLibDoc.getAuthor() || undefined,
+      subject: pdfLibDoc.getSubject() || undefined,
+      keywords: pdfLibDoc.getKeywords() || undefined,
+    };
+    for (let i = 0; i < pageCount; i++) {
+      const sz = pdfLibDoc.getPage(i).getSize();
+      pageAspects.push(sz.width / Math.max(1, sz.height));
+    }
+  } catch {
+    let raw = '';
+    const maxScan = rawBytes.length;
+    for (let i = 0; i < maxScan; i++) {
+      raw += String.fromCharCode(rawBytes[i]);
+    }
+    const pageMatches = raw.match(/\/Type\s*\/Page\b(?!s)/g);
+    pageCount = Math.max(1, pageMatches ? pageMatches.length : 1);
   }
-  const pageMatches = raw.match(/\/Type\s*\/Page\b(?!s)/g);
-  const pageCount = Math.max(1, Math.min(30, pageMatches ? pageMatches.length : 1));
+
+  const sizeKb = Math.max(1, Math.round(rawBytes.byteLength / 1024));
   const pages: PdfPageData[] = Array.from({ length: pageCount }).map((_, idx) => ({
     id: `pdfp_${Date.now()}_${idx + 1}_${Math.random().toString(36).substring(2, 6)}`,
     pageNumber: idx + 1,
     title: `${baseName} — Page ${idx + 1}`,
-    subtitle: `${file.name} (${idx + 1}/${pageCount} 페이지)`,
-    content: `[로컬 파일 불러오기 완료] ${file.name}\n• 파일 크기: ${Math.max(1, Math.round(file.size / 1024))} KB\n• 이 페이지 위에 필기, 형광펜, 스탬프, 먹칠, 댓글을 자유롭게 추가할 수 있습니다.`,
-    sourcePdfName: file.name,
+    subtitle: `${fileName} (${idx + 1}/${pageCount} 페이지)`,
+    content: `[PDF 문서] ${fileName} — P.${idx + 1}/${pageCount} (${sizeKb} KB)`,
+    sourcePdfName: fileName,
+    aspectRatio: pageAspects[idx] || 720 / 1018,
+    sourceDocId,
+    sourcePageNumber: idx + 1,
   }));
 
-  return { pages, meta: {}, usedRealRenderer: false };
+  return { pages, meta: fallbackMeta, usedRealRenderer: false, sourceDocId };
 }
 
 /**
@@ -282,6 +499,8 @@ export interface CompositePageRenderParams {
   watermark?: PdfWatermarkConfig;
   headerFooter?: PdfHeaderFooterConfig;
   scale?: number;
+  /** true일 경우 원본 배경/PDF 이미지를 그리지 않고 필기·텍스트·스탬프·워터마크만 투명 캔버스에 렌더링 (원본 벡터 PDF 페이지 위 오버레이용) */
+  annotationOnlyTransparent?: boolean;
 }
 
 /**
@@ -309,6 +528,7 @@ export async function renderCompositePageToCanvas(
     watermark,
     headerFooter,
     scale = 2,
+    annotationOnlyTransparent = false,
   } = params;
 
   const canvas = document.createElement('canvas');
@@ -319,127 +539,134 @@ export async function renderCompositePageToCanvas(
 
   ctx.scale(scale, scale);
 
-  // 1. 배경색 및 속지 패턴
-  const isDarkBg = isNightMode || paperTemplate === 'dark';
-  ctx.fillStyle = isNightMode ? '#0F172A' : paperTemplate === 'dark' ? '#1E293B' : '#FFFFFF';
-  ctx.fillRect(0, 0, pageWidth, pageHeight);
+  if (!annotationOnlyTransparent) {
+    // 지연 렌더링된 페이지가 아직 렌더링되지 않았다면 지금 즉시 렌더링
+    if (isPdfMode && pdfPage && !pdfPage.renderedImageUri && pdfPage.sourceDocId) {
+      await ensurePdfPageRendered(pdfPage);
+    }
 
-  if (!pdfPage?.renderedImageUri && (!isPdfMode || paperTemplate !== 'blank')) {
-    if (paperTemplate === 'lined' || paperTemplate === 'cornell') {
-      ctx.strokeStyle = isDarkBg ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.08)';
-      ctx.lineWidth = 1;
-      for (let y = 14; y < pageHeight; y += 28) {
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(pageWidth, y);
-        ctx.stroke();
-      }
-      if (paperTemplate === 'cornell') {
-        ctx.strokeStyle = 'rgba(225,29,72,0.24)';
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.moveTo(pageWidth * 0.28, 0);
-        ctx.lineTo(pageWidth * 0.28, pageHeight);
-        ctx.stroke();
-      }
-    } else if (paperTemplate === 'grid' || paperTemplate === 'dark') {
-      ctx.strokeStyle = isDarkBg ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.07)';
-      ctx.lineWidth = 1;
-      for (let x = 0; x <= pageWidth; x += 24) {
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, pageHeight);
-        ctx.stroke();
-      }
-      for (let y = 0; y <= pageHeight; y += 24) {
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(pageWidth, y);
-        ctx.stroke();
-      }
-    } else if (paperTemplate === 'dot') {
-      ctx.fillStyle = 'rgba(15,23,42,0.16)';
-      for (let x = 10; x < pageWidth; x += 20) {
-        for (let y = 10; y < pageHeight; y += 20) {
+    // 1. 배경색 및 속지 패턴
+    const isDarkBg = isNightMode || paperTemplate === 'dark';
+    ctx.fillStyle = isNightMode ? '#0F172A' : paperTemplate === 'dark' ? '#1E293B' : '#FFFFFF';
+    ctx.fillRect(0, 0, pageWidth, pageHeight);
+
+    if (!pdfPage?.renderedImageUri && (!isPdfMode || paperTemplate !== 'blank')) {
+      if (paperTemplate === 'lined' || paperTemplate === 'cornell') {
+        ctx.strokeStyle = isDarkBg ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.08)';
+        ctx.lineWidth = 1;
+        for (let y = 14; y < pageHeight; y += 28) {
           ctx.beginPath();
-          ctx.arc(x, y, 1.2, 0, Math.PI * 2);
-          ctx.fill();
+          ctx.moveTo(0, y);
+          ctx.lineTo(pageWidth, y);
+          ctx.stroke();
+        }
+        if (paperTemplate === 'cornell') {
+          ctx.strokeStyle = 'rgba(225,29,72,0.24)';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(pageWidth * 0.28, 0);
+          ctx.lineTo(pageWidth * 0.28, pageHeight);
+          ctx.stroke();
+        }
+      } else if (paperTemplate === 'grid' || paperTemplate === 'dark') {
+        ctx.strokeStyle = isDarkBg ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.07)';
+        ctx.lineWidth = 1;
+        for (let x = 0; x <= pageWidth; x += 24) {
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, pageHeight);
+          ctx.stroke();
+        }
+        for (let y = 0; y <= pageHeight; y += 24) {
+          ctx.beginPath();
+          ctx.moveTo(0, y);
+          ctx.lineTo(pageWidth, y);
+          ctx.stroke();
+        }
+      } else if (paperTemplate === 'dot') {
+        ctx.fillStyle = 'rgba(15,23,42,0.16)';
+        for (let x = 10; x < pageWidth; x += 20) {
+          for (let y = 10; y < pageHeight; y += 20) {
+            ctx.beginPath();
+            ctx.arc(x, y, 1.2, 0, Math.PI * 2);
+            ctx.fill();
+          }
         }
       }
     }
-  }
 
-  // 2. 원본 PDF 렌더링 이미지 또는 텍스트 기반 PDF 레이아웃
-  if (isPdfMode && pdfPage) {
-    if (pdfPage.renderedImageUri) {
-      try {
-        const img = await loadHtmlImage(pdfPage.renderedImageUri);
-        const imgRatio = img.width / Math.max(1, img.height);
-        const pageRatio = pageWidth / Math.max(1, pageHeight);
-        let drawW = pageWidth;
-        let drawH = pageHeight;
-        let drawX = 0;
-        let drawY = 0;
-        if (imgRatio > pageRatio) {
-          drawH = pageWidth / imgRatio;
-          drawY = (pageHeight - drawH) / 2;
-        } else {
-          drawW = pageHeight * imgRatio;
-          drawX = (pageWidth - drawW) / 2;
+    // 2. 원본 PDF 렌더링 이미지 또는 텍스트 기반 PDF 레이아웃
+    if (isPdfMode && pdfPage) {
+      if (pdfPage.renderedImageUri) {
+        try {
+          const img = await loadHtmlImage(pdfPage.renderedImageUri);
+          const imgRatio = img.width / Math.max(1, img.height);
+          const pageRatio = pageWidth / Math.max(1, pageHeight);
+          let drawW = pageWidth;
+          let drawH = pageHeight;
+          let drawX = 0;
+          let drawY = 0;
+          if (imgRatio > pageRatio) {
+            drawH = pageWidth / imgRatio;
+            drawY = (pageHeight - drawH) / 2;
+          } else {
+            drawW = pageHeight * imgRatio;
+            drawX = (pageWidth - drawW) / 2;
+          }
+          ctx.drawImage(img, drawX, drawY, drawW, drawH);
+        } catch {
+          // fall through
         }
-        ctx.drawImage(img, drawX, drawY, drawW, drawH);
-      } catch {
-        // fall through
-      }
-    } else {
-      const padX = 40;
-      const contentMaxW = Math.max(200, pageWidth - padX * 2);
-      let cy = 54;
+      } else {
+        const padX = 40;
+        const contentMaxW = Math.max(200, pageWidth - padX * 2);
+        let cy = 54;
 
-      ctx.font = '700 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-      ctx.fillStyle = isNightMode ? '#60A5FA' : '#2563EB';
-      ctx.fillText('STICKYCRAFT DOCUMENT', padX, cy);
+        ctx.font = '700 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+        ctx.fillStyle = isNightMode ? '#60A5FA' : '#2563EB';
+        ctx.fillText('STICKYCRAFT DOCUMENT', padX, cy);
 
-      ctx.fillStyle = isNightMode ? '#94A3B8' : '#64748B';
-      const pTag = `PAGE ${pageNumber} OF ${totalPages}`;
-      ctx.fillText(pTag, pageWidth - padX - ctx.measureText(pTag).width, cy);
-      cy += 32;
+        ctx.fillStyle = isNightMode ? '#94A3B8' : '#64748B';
+        const pTag = `PAGE ${pageNumber} OF ${totalPages}`;
+        ctx.fillText(pTag, pageWidth - padX - ctx.measureText(pTag).width, cy);
+        cy += 32;
 
-      ctx.font = '800 22px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-      ctx.fillStyle = isNightMode ? '#F8FAFC' : '#0F172A';
-      for (const line of wrapCanvasLines(ctx, pdfPage.title || '', contentMaxW)) {
-        ctx.fillText(line, padX, cy);
-        cy += 30;
-      }
-
-      if (pdfPage.subtitle) {
-        cy += 2;
-        ctx.font = '600 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-        ctx.fillStyle = isNightMode ? '#94A3B8' : '#475569';
-        for (const line of wrapCanvasLines(ctx, pdfPage.subtitle, contentMaxW)) {
+        ctx.font = '800 22px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+        ctx.fillStyle = isNightMode ? '#F8FAFC' : '#0F172A';
+        for (const line of wrapCanvasLines(ctx, pdfPage.title || '', contentMaxW)) {
           ctx.fillText(line, padX, cy);
-          cy += 22;
+          cy += 30;
         }
-      }
 
-      cy += 8;
-      ctx.strokeStyle = isNightMode ? '#334155' : '#E2E8F0';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(padX, cy);
-      ctx.lineTo(pageWidth - padX, cy);
-      ctx.stroke();
-
-      cy += 28;
-      ctx.font = '400 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-      ctx.fillStyle = isNightMode ? '#E2E8F0' : '#334155';
-      for (const line of wrapCanvasLines(ctx, pdfPage.content || '', contentMaxW)) {
-        if (!line) {
-          cy += 16;
-          continue;
+        if (pdfPage.subtitle) {
+          cy += 2;
+          ctx.font = '600 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+          ctx.fillStyle = isNightMode ? '#94A3B8' : '#475569';
+          for (const line of wrapCanvasLines(ctx, pdfPage.subtitle, contentMaxW)) {
+            ctx.fillText(line, padX, cy);
+            cy += 22;
+          }
         }
-        ctx.fillText(line, padX, cy);
-        cy += 24;
+
+        cy += 8;
+        ctx.strokeStyle = isNightMode ? '#334155' : '#E2E8F0';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(padX, cy);
+        ctx.lineTo(pageWidth - padX, cy);
+        ctx.stroke();
+
+        cy += 28;
+        ctx.font = '400 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+        ctx.fillStyle = isNightMode ? '#E2E8F0' : '#334155';
+        for (const line of wrapCanvasLines(ctx, pdfPage.content || '', contentMaxW)) {
+          if (!line) {
+            cy += 16;
+            continue;
+          }
+          ctx.fillText(line, padX, cy);
+          cy += 24;
+        }
       }
     }
   }
@@ -604,11 +831,77 @@ export async function renderCompositePageToCanvas(
   return canvas;
 }
 
+function parseHexRgb(hex?: string): { r: number; g: number; b: number } {
+  const clean = (hex || '#1E293B').replace('#', '').trim();
+  if (clean.length === 6) {
+    const r = parseInt(clean.slice(0, 2), 16) / 255;
+    const g = parseInt(clean.slice(2, 4), 16) / 255;
+    const b = parseInt(clean.slice(4, 6), 16) / 255;
+    if (!isNaN(r) && !isNaN(g) && !isNaN(b)) return { r, g, b };
+  }
+  return { r: 0.12, g: 0.16, b: 0.23 };
+}
+
 /**
- * pdf-lib를 사용하여 편집·병합·분할·회전·필기·워터마크·스탬프·먹칠이 모두 반영된
- * 진짜 .pdf 바이너리 파일을 생성하고 다운로드합니다!
+ * pdf-lib 페이지 위에 벡터 필기 스트로크를 직접 그려 넣습니다 (캔버스 미지원 모바일/테스트 환경 및 벡터 확대 보존용)
  */
-export async function exportDocumentToRealPdf(params: {
+function drawVectorStrokesOnPdfPage(
+  pdfPage: any,
+  strokes: FreeHandStroke[],
+  uiWidth: number,
+  uiHeight: number
+) {
+  const { width: pdfW, height: pdfH } = pdfPage.getSize();
+  const sx = pdfW / Math.max(1, uiWidth);
+  const sy = pdfH / Math.max(1, uiHeight);
+
+  for (const s of strokes) {
+    const c = parseHexRgb(s.color);
+    const colorObj = rgb(c.r, c.g, c.b);
+    const opacity = s.tool === 'highlighter' ? 0.38 : 1.0;
+    const thickness = Math.max(1, (s.width || 3) * sx);
+
+    if (s.tool === 'shape' && s.shapeStart && s.shapeEnd) {
+      const x1 = s.shapeStart.x * sx;
+      const y1 = pdfH - s.shapeStart.y * sy;
+      const x2 = s.shapeEnd.x * sx;
+      const y2 = pdfH - s.shapeEnd.y * sy;
+      pdfPage.drawLine({
+        start: { x: x1, y: y1 },
+        end: { x: x2, y: y2 },
+        thickness,
+        color: colorObj,
+        opacity,
+      });
+    } else if (s.points && s.points.length > 0) {
+      if (s.points.length === 1) {
+        const px = s.points[0].x * sx;
+        const py = pdfH - s.points[0].y * sy;
+        pdfPage.drawLine({
+          start: { x: px, y: py },
+          end: { x: px + 0.8, y: py + 0.8 },
+          thickness,
+          color: colorObj,
+          opacity,
+        });
+      } else {
+        for (let i = 0; i < s.points.length - 1; i++) {
+          const p1 = s.points[i];
+          const p2 = s.points[i + 1];
+          pdfPage.drawLine({
+            start: { x: p1.x * sx, y: pdfH - p1.y * sy },
+            end: { x: p2.x * sx, y: pdfH - p2.y * sy },
+            thickness,
+            color: colorObj,
+            opacity,
+          });
+        }
+      }
+    }
+  }
+}
+
+export interface ExportRealPdfParams {
   title: string;
   totalPages: number;
   pageWidth: number;
@@ -626,9 +919,14 @@ export async function exportDocumentToRealPdf(params: {
   watermark?: PdfWatermarkConfig;
   headerFooter?: PdfHeaderFooterConfig;
   meta?: PdfDocumentMeta;
-}): Promise<boolean> {
-  if (Platform.OS !== 'web' || typeof window === 'undefined') return false;
+}
 
+/**
+ * 원본 PDF의 벡터 텍스트·폰트·도형을 그대로 보존(copyPages)하면서
+ * 그 위에 필기·형광펜·텍스트 상자·스탬프·워터마크를 합성한 실제 .pdf 바이너리(Uint8Array)를 생성합니다.
+ * 외부 PDF 리더에서 열었을 때 마지막 쪽(예: 80쪽) 필기가 선명하게 보이고 원문 문장 검색·복사가 그대로 동작합니다.
+ */
+export async function buildExportedPdfBytes(params: ExportRealPdfParams): Promise<Uint8Array> {
   const pdfDoc = await PDFDocument.create();
   pdfDoc.setTitle(params.title || 'StickyCraft Document');
   if (params.meta?.author) pdfDoc.setAuthor(params.meta.author);
@@ -644,9 +942,100 @@ export async function exportDocumentToRealPdf(params: {
   pdfDoc.setProducer('StickyCraft Pro PDF Engine');
   pdfDoc.setCreator('StickyCraft Pro');
 
+  // 원본 PDF 문서 캐시 로드 (동일 sourceDocId는 1회만 파싱)
+  const loadedSourceDocs = new Map<string, any>();
+  const getLoadedSourceDoc = async (sourceDocId?: string) => {
+    if (!sourceDocId) return null;
+    if (loadedSourceDocs.has(sourceDocId)) return loadedSourceDocs.get(sourceDocId);
+    const bytes = getPdfBinary(sourceDocId);
+    if (!bytes) return null;
+    try {
+      const doc = await PDFDocument.load(bytes, { ignoreEncryption: true });
+      loadedSourceDocs.set(sourceDocId, doc);
+      return doc;
+    } catch {
+      return null;
+    }
+  };
+
   const count = Math.max(1, params.totalPages);
   for (let pNum = 1; pNum <= count; pNum++) {
     const pageData = params.pdfPages[pNum - 1] || null;
+    const pageStrokes = params.strokes.filter((s) => (s.pageIndex || 1) === pNum);
+    const pageTextBoxes = params.textBoxes.filter((t) => (t.pageIndex || 1) === pNum);
+    const pageStamps = params.stamps.filter((s) => s.pageIndex === pNum);
+    const pageRedactions = params.redactions.filter((r) => r.pageIndex === pNum);
+
+    const srcDoc =
+      pageRedactions.length === 0 ? await getLoadedSourceDoc(pageData?.sourceDocId) : null;
+
+    if (srcDoc && pageData?.sourcePageNumber) {
+      // 원본 벡터 PDF 페이지를 그대로 복사하여 원문 텍스트 선택·검색 100% 유지!
+      const srcIdx = Math.max(0, Math.min(srcDoc.getPageCount() - 1, pageData.sourcePageNumber - 1));
+      const [copiedPage] = await pdfDoc.copyPages(srcDoc, [srcIdx]);
+      const pdfPage = pdfDoc.addPage(copiedPage);
+      const { width: pdfW, height: pdfH } = pdfPage.getSize();
+
+      const hasAnnotations =
+        pageStrokes.length > 0 ||
+        pageTextBoxes.length > 0 ||
+        pageStamps.length > 0 ||
+        Boolean(params.watermark?.enabled && params.watermark.text.trim()) ||
+        Boolean(params.headerFooter?.enabled);
+
+      if (hasAnnotations) {
+        // 1. 벡터 스트로크를 PDF 페이지 컨텐츠 스트림에 직접 기록
+        if (pageStrokes.length > 0) {
+          drawVectorStrokesOnPdfPage(pdfPage, pageStrokes, params.pageWidth, params.pageHeight);
+        }
+        // 2. 한글 텍스트 상자·스탬프·워터마크·머리글이 있는 경우 투명 PNG 오버레이도 함께 합성
+        const hasRichOverlay =
+          pageTextBoxes.length > 0 ||
+          pageStamps.length > 0 ||
+          Boolean(params.watermark?.enabled && params.watermark.text.trim()) ||
+          Boolean(params.headerFooter?.enabled);
+
+        if (hasRichOverlay && Platform.OS === 'web' && typeof document !== 'undefined') {
+          const overlayCanvas = await renderCompositePageToCanvas({
+            pageNumber: pNum,
+            totalPages: count,
+            pageWidth: params.pageWidth,
+            pageHeight: params.pageHeight,
+            isPdfMode: params.isPdfMode,
+            isNightMode: params.isNightMode,
+            paperTemplate: params.pageTemplates[pNum] || params.defaultTemplate,
+            pdfPage: pageData,
+            strokes: [], // 벡터로 이미 기록됨
+            textBoxes: pageTextBoxes,
+            stamps: pageStamps,
+            redactions: [],
+            watermark: params.watermark,
+            headerFooter: params.headerFooter,
+            scale: 1.8,
+            annotationOnlyTransparent: true,
+          });
+          if (overlayCanvas) {
+            const pngDataUrl = overlayCanvas.toDataURL('image/png');
+            const pngBytes = base64ToUint8Array(pngDataUrl);
+            const embeddedPng = await pdfDoc.embedPng(pngBytes);
+            pdfPage.drawImage(embeddedPng, { x: 0, y: 0, width: pdfW, height: pdfH });
+          }
+        }
+      }
+
+      const rot = params.pageRotations[pNum] || 0;
+      if (rot % 360 !== 0) {
+        const curRot = pdfPage.getRotation().angle || 0;
+        pdfPage.setRotation(degrees((curRot + rot) % 360));
+      }
+      continue;
+    }
+
+    // 원본 바이너리가 없는 자체 페이지 또는 민감정보 먹칠(Redaction) 영구 마스킹 페이지
+    const a4W = 595.28;
+    const a4H = (params.pageHeight / Math.max(1, params.pageWidth)) * a4W;
+    const pdfPage = pdfDoc.addPage([a4W, a4H]);
+
     const canvas = await renderCompositePageToCanvas({
       pageNumber: pNum,
       totalPages: count,
@@ -656,28 +1045,23 @@ export async function exportDocumentToRealPdf(params: {
       isNightMode: params.isNightMode,
       paperTemplate: params.pageTemplates[pNum] || params.defaultTemplate,
       pdfPage: pageData,
-      strokes: params.strokes.filter((s) => (s.pageIndex || 1) === pNum),
-      textBoxes: params.textBoxes.filter((t) => (t.pageIndex || 1) === pNum),
-      stamps: params.stamps.filter((s) => s.pageIndex === pNum),
-      redactions: params.redactions.filter((r) => r.pageIndex === pNum),
+      strokes: pageStrokes,
+      textBoxes: pageTextBoxes,
+      stamps: pageStamps,
+      redactions: pageRedactions,
       watermark: params.watermark,
       headerFooter: params.headerFooter,
       scale: 1.8,
     });
 
-    if (!canvas) continue;
-    const jpgDataUrl = canvas.toDataURL('image/jpeg', 0.92);
-    const base64 = jpgDataUrl.split(',')[1];
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-
-    const embeddedImg = await pdfDoc.embedJpg(bytes);
-    // A4 포인트 표준 크기 (595.28 x 841.89 pt)
-    const a4W = 595.28;
-    const a4H = (params.pageHeight / Math.max(1, params.pageWidth)) * a4W;
-    const pdfPage = pdfDoc.addPage([a4W, a4H]);
-    pdfPage.drawImage(embeddedImg, { x: 0, y: 0, width: a4W, height: a4H });
+    if (canvas) {
+      const jpgDataUrl = canvas.toDataURL('image/jpeg', 0.92);
+      const bytes = base64ToUint8Array(jpgDataUrl);
+      const embeddedImg = await pdfDoc.embedJpg(bytes);
+      pdfPage.drawImage(embeddedImg, { x: 0, y: 0, width: a4W, height: a4H });
+    } else if (pageStrokes.length > 0) {
+      drawVectorStrokesOnPdfPage(pdfPage, pageStrokes, params.pageWidth, params.pageHeight);
+    }
 
     const rot = params.pageRotations[pNum] || 0;
     if (rot % 360 !== 0) {
@@ -685,18 +1069,47 @@ export async function exportDocumentToRealPdf(params: {
     }
   }
 
-  const pdfBytes = await pdfDoc.save();
-  const blob = new Blob([pdfBytes as any], { type: 'application/pdf' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
+  return await pdfDoc.save();
+}
+
+/**
+ * pdf-lib를 사용하여 원문 텍스트와 필기·주석이 모두 반영된 실제 .pdf 파일을 다운로드(웹)하거나 시스템 공유 시트(모바일)로 공유합니다.
+ */
+export async function exportDocumentToRealPdf(params: ExportRealPdfParams): Promise<boolean> {
+  const pdfBytes = await buildExportedPdfBytes(params);
   const safeName = (params.title || 'document').replace(/\.pdf$/i, '') + '.pdf';
-  a.href = url;
-  a.download = safeName;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-  return true;
+
+  if (Platform.OS === 'web' && typeof window !== 'undefined') {
+    const blob = new Blob([pdfBytes as any], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = safeName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return true;
+  }
+
+  try {
+    const fileUri = `${FileSystem.documentDirectory || ''}${safeName}`;
+    const base64Data = uint8ArrayToBase64(pdfBytes);
+    await FileSystem.writeAsStringAsync(fileUri, base64Data, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+    if (await Sharing.isAvailableAsync()) {
+      await Sharing.shareAsync(fileUri, {
+        mimeType: 'application/pdf',
+        dialogTitle: `${safeName} 공유`,
+        UTI: 'com.adobe.pdf',
+      });
+    }
+    return true;
+  } catch (err) {
+    console.warn('Mobile PDF share failed:', err);
+    return false;
+  }
 }
 
 /**
